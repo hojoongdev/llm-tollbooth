@@ -107,6 +107,21 @@ services:
       - "8025:8025" # web UI
       - "1025:1025" # SMTP endpoint the workers send to
 
+  # Ingest worker: consumes llm.events off the topic. In P1 it just logs each
+  # event to prove the pipeline; P2 makes it write to Cassandra + MongoDB.
+  ingest:
+    build: ./workers/ingest
+    image: llm-tollbooth/ingest
+    container_name: llm-tollbooth-ingest
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_BOOTSTRAP: kafka:29092
+      KAFKA_TOPIC: llm.events
+      KAFKA_GROUP_ID: ingest
+    restart: unless-stopped
+
   # Synthetic traffic generator. Not a long-running service — run on demand:
   #   docker compose run --rm loadgen --rps 50 --duration 10
   # The "tools" profile keeps it out of a plain `docker compose up`.
