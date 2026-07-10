@@ -107,6 +107,19 @@ services:
       - "8025:8025" # web UI
       - "1025:1025" # SMTP endpoint the workers send to
 
+  # Synthetic traffic generator. Not a long-running service — run on demand:
+  #   docker compose run --rm loadgen --rps 50 --duration 10
+  # The "tools" profile keeps it out of a plain `docker compose up`.
+  loadgen:
+    build: ./loadgen
+    image: llm-tollbooth/loadgen
+    profiles: ["tools"]
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_BOOTSTRAP: kafka:29092
+
 volumes:
   cassandra_data:
   mongo_data:
