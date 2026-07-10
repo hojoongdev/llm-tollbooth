@@ -55,7 +55,7 @@ A built-in **mock provider** lets the whole system run and demo **without any re
 
 Each phase ends in a *running* state — not a half-built one.
 
-- [ ] **P1 — Skeleton.** `docker compose up` brings up Kafka/Cassandra/MongoDB/MailHog; loadgen publishes fake events; a minimal ingest worker consumes and logs them.
+- [x] **P1 — Skeleton.** `docker compose up` brings up Kafka/Cassandra/MongoDB/Mailpit; loadgen publishes fake events; a minimal ingest worker consumes and logs them.
 - [ ] **P2 — Observability.** Workers persist to Cassandra (metrics) + MongoDB (requests); dashboard Overview + Requests views.
 - [ ] **P3 — Gateway.** Fastify proxy: API-key auth, mock + OpenAI/Anthropic adapters, cost calc, caching, budgets, rate limits, Kafka publish.
 - [ ] **P4 — Workflows & alerts.** Rules worker + rule builder UI + email/webhook/block/tag actions + cooldowns + firing history.
@@ -78,7 +78,27 @@ llm-tollbooth/
 
 ## Getting started
 
-Coming with **P1** (`docker compose up`). Until then, see the full design in [`docs/spec.md`](docs/spec.md).
+Requires Docker (Desktop or Engine) with Compose v2. No local Node/Python needed —
+everything runs in containers.
+
+```bash
+git clone https://github.com/hojoongdev/LLM-Tollbooth.git
+cd LLM-Tollbooth
+cp .env.example .env
+
+# Bring up the stack (Kafka, Cassandra, MongoDB, Mailpit, ingest worker)
+docker compose up -d --wait
+
+# Push some synthetic traffic through the pipeline
+docker compose run --rm loadgen --rps 50 --duration 10
+
+# Watch the ingest worker consume it
+docker compose logs -f ingest
+```
+
+Mailpit's web UI is at http://localhost:8025 (empty until the P4 email action lands).
+
+The full design lives in [`docs/spec.md`](docs/spec.md).
 
 ## License
 
