@@ -42,6 +42,23 @@ services:
       retries: 10
       start_period: 20s
 
+  # One-shot: waits for the broker, then creates the llm.events topic with 6
+  # partitions (so consumers can scale out later) and exits. Safe to re-run.
+  kafka-init:
+    image: apache/kafka:3.9.0
+    container_name: llm-tollbooth-kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/opt/kafka/bin/kafka-topics.sh"]
+    command: >
+      --bootstrap-server kafka:29092
+      --create --if-not-exists
+      --topic llm.events
+      --partitions 6
+      --replication-factor 1
+    restart: "no"
+
   # Time-series metrics store. Absorbs the write-heavy stream of per-request rows
   # and hourly rollups; the dashboard reads aggregates back out of here.
   cassandra:
