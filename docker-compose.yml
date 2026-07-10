@@ -1,0 +1,140 @@
+# All services for LLM Tollbooth run from this one file.
+# `docker compose up` brings the whole stack up; each phase adds a service here.
+name: llm-tollbooth
+
+services:
+  # Event backbone. The gateway publishes one event per LLM call here, and the
+  # workers consume it off the request's critical path.
+  kafka:
+    image: apache/kafka:3.9.0
+    container_name: llm-tollbooth-kafka
+    ports:
+      - "9092:9092" # host tools reach the broker on localhost:9092
+    environment:
+      # KRaft: this single node is both broker and controller (no ZooKeeper).
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+
+      # Two client listeners so both in-cluster and host clients get an address
+      # that actually resolves from where they sit:
+      #   INTERNAL (29092) -> other containers connect via the service name "kafka"
+      #   EXTERNAL (9092)  -> tools on the host connect via "localhost"
+      KAFKA_LISTENERS: INTERNAL://:29092,EXTERNAL://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,EXTERNAL://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+
+      # Single node: internal topics can only have one replica.
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+
+      # We create llm.events explicitly (with 6 partitions), so don't let a typo'd
+      # topic name silently spawn a 1-partition topic.
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  # One-shot: waits for the broker, then creates the llm.events topic with 6
+  # partitions (so consumers can scale out later) and exits. Safe to re-run.
+  kafka-init:
+    image: apache/kafka:3.9.0
+    container_name: llm-tollbooth-kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/opt/kafka/bin/kafka-topics.sh"]
+    command: >
+      --bootstrap-server kafka:29092
+      --create --if-not-exists
+      --topic llm.events
+      --partitions 6
+      --replication-factor 1
+    restart: "no"
+
+  # Time-series metrics store. Absorbs the write-heavy stream of per-request rows
+  # and hourly rollups; the dashboard reads aggregates back out of here.
+  cassandra:
+    image: cassandra:5.0
+    container_name: llm-tollbooth-cassandra
+    ports:
+      - "9042:9042" # CQL
+    environment:
+      CASSANDRA_CLUSTER_NAME: llm-tollbooth
+      # Cassandra grabs ~1/4 of host RAM by default. Cap it so it can share a
+      # laptop with Kafka + Mongo. (The image requires both vars set together.)
+      MAX_HEAP_SIZE: 1G
+      HEAP_NEWSIZE: 256M
+    volumes:
+      - cassandra_data:/var/lib/cassandra
+    healthcheck:
+      test: ["CMD-SHELL", "cqlsh -e 'describe cluster' >/dev/null 2>&1"]
+      interval: 15s
+      timeout: 10s
+      retries: 12
+      start_period: 90s
+
+  # Flexible document store: full prompt/response bodies, rules, API keys and
+  # pricing — anything whose shape varies from one request to the next.
+  mongodb:
+    image: mongo:7
+    container_name: llm-tollbooth-mongo
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --quiet --eval \"db.adminCommand('ping').ok\" | grep -q 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  # Local SMTP trap for the email alert action (P4): catches outgoing mail and
+  # shows it in a web UI instead of really sending it. Dev-only.
+  # Mailpit stands in for the unmaintained MailHog — same SMTP (1025) / UI (8025) ports.
+  mailpit:
+    image: axllent/mailpit:latest
+    container_name: llm-tollbooth-mailpit
+    ports:
+      - "8025:8025" # web UI
+      - "1025:1025" # SMTP endpoint the workers send to
+
+  # Ingest worker: consumes llm.events off the topic. In P1 it just logs each
+  # event to prove the pipeline; P2 makes it write to Cassandra + MongoDB.
+  ingest:
+    build: ./workers/ingest
+    image: llm-tollbooth/ingest
+    container_name: llm-tollbooth-ingest
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_BOOTSTRAP: kafka:29092
+      KAFKA_TOPIC: llm.events
+      KAFKA_GROUP_ID: ingest
+    restart: unless-stopped
+
+  # Synthetic traffic generator. Not a long-running service — run on demand:
+  #   docker compose run --rm loadgen --rps 50 --duration 10
+  # The "tools" profile keeps it out of a plain `docker compose up`.
+  loadgen:
+    build: ./loadgen
+    image: llm-tollbooth/loadgen
+    profiles: ["tools"]
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_BOOTSTRAP: kafka:29092
+
+volumes:
+  cassandra_data:
+  mongo_data:

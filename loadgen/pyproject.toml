@@ -1,0 +1,18 @@
+[project]
+name = "loadgen"
+version = "0.1.0"
+description = "Synthetic LLM event/traffic generator for LLM Tollbooth"
+requires-python = ">=3.12"
+dependencies = [
+    "confluent-kafka==2.6.1",
+]
+
+[project.scripts]
+loadgen = "loadgen.main:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["loadgen"]
