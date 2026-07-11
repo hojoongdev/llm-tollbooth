@@ -1,12 +1,13 @@
 import { readRollup } from "@/lib/cassandra";
 import { modelBreakdown } from "@/lib/mongo";
-import { parseRange, windowFor, RANGE_LABEL } from "@/lib/time";
+import { parseRange, windowFor, RANGE_LABEL_KO } from "@/lib/time";
 import { Cards } from "@/components/Cards";
 import { ModelBreakdown } from "@/components/ModelBreakdown";
+import { PageBody, PageHeader } from "@/components/page-header";
 import { RangeFilter } from "@/components/RangeFilter";
 import { TrendChart } from "@/components/TrendChart";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
-// Live data on every load — never prerendered or cached.
 export const dynamic = "force-dynamic";
 
 export default async function OverviewPage({
@@ -20,25 +21,21 @@ export default async function OverviewPage({
 
   return (
     <>
-      <div className="page-head">
-        <div>
-          <h1>Overview</h1>
-          <p>{RANGE_LABEL[range]}</p>
-        </div>
+      <PageHeader title="Overview" description={`${RANGE_LABEL_KO[range]} · 프로젝트 default`}>
         <RangeFilter range={range} basePath="/" />
-      </div>
-
-      <Cards totals={overview.totals} />
-
-      <div className="panel">
-        <h2>
-          Requests over time
-          <span className="legend">requests · errors (hourly rollup)</span>
-        </h2>
-        <TrendChart points={overview.trend} unit={w.unit} />
-      </div>
-
-      <ModelBreakdown rows={models} range={range} />
+      </PageHeader>
+      <PageBody>
+        <Cards totals={overview.totals} />
+        <Card>
+          <CardHeader>
+            <CardTitle>Requests over time</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <TrendChart points={overview.trend} unit={w.unit} />
+          </CardContent>
+        </Card>
+        <ModelBreakdown rows={models} range={range} />
+      </PageBody>
     </>
   );
 }

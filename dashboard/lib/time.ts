@@ -12,6 +12,14 @@ export const RANGE_LABEL: Record<Range, string> = {
   "30d": "Last 30 days",
 };
 
+// Korean descriptions (UI labels stay English; prose is Korean per the design system).
+export const RANGE_LABEL_KO: Record<Range, string> = {
+  "1h": "최근 1시간",
+  "24h": "최근 24시간",
+  "7d": "최근 7일",
+  "30d": "최근 30일",
+};
+
 export function parseRange(v: string | undefined): Range {
   return RANGES.includes(v as Range) ? (v as Range) : "24h";
 }

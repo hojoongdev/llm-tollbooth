@@ -1,19 +1,21 @@
 import type { Totals } from "@/lib/cassandra";
 import { count, ms, pct, tokens, usd } from "@/lib/format";
+import { cn } from "@/lib/utils";
+import { Card } from "./ui/card";
 
 function Stat({ label, value, sub, err }: { label: string; value: string; sub: string; err?: boolean }) {
   return (
-    <div className="card stat">
-      <div className="label">{label}</div>
-      <div className="value">{value}</div>
-      <div className={err ? "sub err" : "sub"}>{sub}</div>
-    </div>
+    <Card className="p-4">
+      <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">{label}</div>
+      <div className="mt-1.5 font-mono text-2xl font-semibold tracking-tight tabular-nums">{value}</div>
+      <div className={cn("mt-1 text-xs", err ? "text-destructive" : "text-muted-foreground")}>{sub}</div>
+    </Card>
   );
 }
 
 export function Cards({ totals }: { totals: Totals }) {
   return (
-    <div className="cards">
+    <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
       <Stat
         label="Cost"
         value={usd(totals.cost)}

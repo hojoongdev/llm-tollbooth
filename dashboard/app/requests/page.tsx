@@ -1,8 +1,10 @@
 import { listRequests } from "@/lib/mongo";
-import { parseRange, windowFor, RANGE_LABEL } from "@/lib/time";
+import { parseRange, windowFor, RANGE_LABEL_KO } from "@/lib/time";
 import { Filters } from "@/components/Filters";
+import { PageBody, PageHeader } from "@/components/page-header";
 import { RangeFilter } from "@/components/RangeFilter";
 import { RequestsTable } from "@/components/RequestsTable";
+import { Card } from "@/components/ui/card";
 
 export const dynamic = "force-dynamic";
 
@@ -20,21 +22,18 @@ export default async function RequestsPage({
 
   return (
     <>
-      <div className="page-head">
-        <div>
-          <h1>Requests</h1>
-          <p>
-            {RANGE_LABEL[range]} · {rows.length === LIMIT ? `newest ${LIMIT}` : `${rows.length} shown`}
-          </p>
-        </div>
+      <PageHeader
+        title="Requests"
+        description={`${RANGE_LABEL_KO[range]} · ${rows.length === LIMIT ? `최신 ${LIMIT}건` : `${rows.length}건`}`}
+      >
         <RangeFilter range={range} basePath="/requests" extra={{ model: sp.model, status: sp.status }} />
-      </div>
-
-      <Filters range={range} model={sp.model} status={sp.status} />
-
-      <div className="panel">
-        <RequestsTable rows={rows} />
-      </div>
+      </PageHeader>
+      <PageBody>
+        <Filters range={range} model={sp.model} status={sp.status} />
+        <Card className="overflow-hidden">
+          <RequestsTable rows={rows} />
+        </Card>
+      </PageBody>
     </>
   );
 }
