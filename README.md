@@ -6,7 +6,7 @@ user-defined workflows (condition → email / webhook / block).
 
 Every call passes through the tollbooth: it gets metered, and if you're over budget, it gets stopped.
 
-**Status:** early development — building Phase 1 (infrastructure skeleton). See [Roadmap](#roadmap).
+**Status:** early development — Phases 1–2 done (pipeline + observability console); building Phase 3 (gateway). See [Roadmap](#roadmap).
 
 ---
 
@@ -56,7 +56,7 @@ A built-in **mock provider** lets the whole system run and demo **without any re
 Each phase ends in a *running* state — not a half-built one.
 
 - [x] **P1 — Skeleton.** `docker compose up` brings up Kafka/Cassandra/MongoDB/Mailpit; loadgen publishes fake events; a minimal ingest worker consumes and logs them.
-- [ ] **P2 — Observability.** Workers persist to Cassandra (metrics) + MongoDB (requests); dashboard Overview + Requests views.
+- [x] **P2 — Observability.** Ingest worker persists to Cassandra (raw rows + hourly rollups) + MongoDB (request docs); Next.js console with Overview + Requests views.
 - [ ] **P3 — Gateway.** Fastify proxy: API-key auth, mock + OpenAI/Anthropic adapters, cost calc, caching, budgets, rate limits, Kafka publish.
 - [ ] **P4 — Workflows & alerts.** Rules worker + rule builder UI + email/webhook/block/tag actions + cooldowns + firing history.
 - [ ] **P5 — Quality, streaming, fallback.** Sampled LLM-as-judge evaluation, quality dashboard, SSE proxy, model fallback.
@@ -86,13 +86,19 @@ git clone https://github.com/hojoongdev/LLM-Tollbooth.git
 cd LLM-Tollbooth
 cp .env.example .env
 
-# Bring up the stack (Kafka, Cassandra, MongoDB, Mailpit, ingest worker)
+# Bring up the stack (Kafka, Cassandra, MongoDB, Mailpit, ingest worker, console)
 docker compose up -d --wait
 
 # Push some synthetic traffic through the pipeline
 docker compose run --rm loadgen --rps 50 --duration 10
+```
 
-# Watch the ingest worker consume it
+Open the **console at http://localhost:3000** — the traffic you just pushed shows up under
+**Overview** (cost / requests / error rate / latency, a trend chart and per-model breakdown)
+and **Requests** (a filterable log; click any row for the request detail).
+
+```bash
+# Optional: watch the ingest worker persist events as it flushes batches
 docker compose logs -f ingest
 ```
 
