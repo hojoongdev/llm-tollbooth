@@ -81,6 +81,20 @@ services:
       retries: 12
       start_period: 90s
 
+  # One-shot: waits for Cassandra, applies the keyspace/schema, then exits. The
+  # cassandra image has no init-script hook (unlike mongo), so we apply it here.
+  # Mirrors the kafka-init pattern. init.cql is idempotent (IF NOT EXISTS).
+  cassandra-init:
+    image: cassandra:5.0
+    container_name: llm-tollbooth-cassandra-init
+    depends_on:
+      cassandra:
+        condition: service_healthy
+    volumes:
+      - ./infra/cassandra/init.cql:/init.cql:ro
+    entrypoint: ["cqlsh", "cassandra", "-f", "/init.cql"]
+    restart: "no"
+
   # Flexible document store: full prompt/response bodies, rules, API keys and
   # pricing — anything whose shape varies from one request to the next.
   mongodb:
@@ -107,8 +121,9 @@ services:
       - "8025:8025" # web UI
       - "1025:1025" # SMTP endpoint the workers send to
 
-  # Ingest worker: consumes llm.events off the topic. In P1 it just logs each
-  # event to prove the pipeline; P2 makes it write to Cassandra + MongoDB.
+  # Ingest worker: consumes llm.events and persists it off the hot path — raw
+  # rows + hourly rollups to Cassandra, request documents to MongoDB (P2).
+  # Waits for the schema (cassandra-init) before it starts writing.
   ingest:
     build: ./workers/ingest
     image: llm-tollbooth/ingest
@@ -116,10 +131,20 @@ services:
     depends_on:
       kafka:
         condition: service_healthy
+      cassandra:
+        condition: service_healthy
+      cassandra-init:
+        condition: service_completed_successfully
+      mongodb:
+        condition: service_healthy
     environment:
       KAFKA_BOOTSTRAP: kafka:29092
       KAFKA_TOPIC: llm.events
       KAFKA_GROUP_ID: ingest
+      CASSANDRA_CONTACT_POINTS: cassandra
+      CASSANDRA_KEYSPACE: tollbooth
+      MONGO_URI: mongodb://mongodb:27017
+      MONGO_DB: tollbooth
     restart: unless-stopped
 
   # Synthetic traffic generator. Not a long-running service — run on demand:
