@@ -1,12 +1,26 @@
 "use client";
 
 import { usePathname } from "next/navigation";
-import { LayoutDashboard, ScrollText, TrafficCone, type LucideIcon } from "lucide-react";
+import { LayoutDashboard, LogOut, ScrollText, TrafficCone, type LucideIcon } from "lucide-react";
 
+import { logout } from "@/app/login/actions";
 import { PROJECT } from "@/lib/config";
 import { cn } from "@/lib/utils";
 import { usePendingNav } from "./pending-nav";
 import { ThemeToggle } from "./theme-toggle";
+
+function SignOutButton() {
+  return (
+    <form action={logout}>
+      <button
+        type="submit"
+        className="inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+      >
+        <LogOut className="h-3.5 w-3.5" strokeWidth={2} /> Sign out
+      </button>
+    </form>
+  );
+}
 
 const NAV: { href: string; label: string; icon: LucideIcon }[] = [
   { href: "/", label: "Overview", icon: LayoutDashboard },
@@ -61,7 +75,7 @@ function useActiveHref() {
 }
 
 /** Fixed rail on md+. */
-export function AppSidebar() {
+export function AppSidebar({ authEnabled }: { authEnabled?: boolean }) {
   const active = useActiveHref();
   return (
     <aside className="sticky top-0 hidden h-svh w-52 shrink-0 flex-col border-r border-border bg-card md:flex">
@@ -81,14 +95,17 @@ export function AppSidebar() {
           <span className="text-muted-foreground">project</span>
           <span className="font-mono tabular-nums">{PROJECT}</span>
         </div>
-        <ThemeToggle />
+        <div className="flex items-center justify-between gap-2">
+          <ThemeToggle />
+          {authEnabled ? <SignOutButton /> : null}
+        </div>
       </div>
     </aside>
   );
 }
 
 /** Top bar on mobile (md:hidden). */
-export function MobileBar() {
+export function MobileBar({ authEnabled }: { authEnabled?: boolean }) {
   const active = useActiveHref();
   return (
     <header className="sticky top-0 z-30 flex h-12 items-center gap-3 border-b border-border bg-card px-4 md:hidden">
@@ -98,6 +115,7 @@ export function MobileBar() {
           <NavLink key={item.href} {...item} active={matches(item.href, active)} />
         ))}
         <ThemeToggle />
+        {authEnabled ? <SignOutButton /> : null}
       </nav>
     </header>
   );

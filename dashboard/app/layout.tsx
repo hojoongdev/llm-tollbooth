@@ -1,8 +1,6 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 
-import { AppSidebar, MobileBar } from "@/components/app-sidebar";
-import { MainArea, PendingNavProvider } from "@/components/pending-nav";
 import { ThemeProvider } from "@/components/theme-provider";
 import "./globals.css";
 
@@ -22,15 +20,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
       <body className="min-h-svh">
-        <ThemeProvider>
-          <PendingNavProvider>
-            <div className="flex min-h-svh flex-col md:flex-row">
-              <MobileBar />
-              <AppSidebar />
-              <MainArea>{children}</MainArea>
-            </div>
-          </PendingNavProvider>
-        </ThemeProvider>
+        <ThemeProvider>{children}</ThemeProvider>
       </body>
     </html>
   );
