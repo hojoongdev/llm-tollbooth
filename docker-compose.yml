@@ -147,6 +147,31 @@ services:
       MONGO_DB: tollbooth
     restart: unless-stopped
 
+  # Console + read API. Server components read hourly rollups from Cassandra
+  # (trends/cards) and request documents from MongoDB (log + detail). P2 ships
+  # the Overview and Requests screens.
+  dashboard:
+    build: ./dashboard
+    image: llm-tollbooth/dashboard
+    container_name: llm-tollbooth-dashboard
+    ports:
+      - "3000:3000"
+    depends_on:
+      cassandra:
+        condition: service_healthy
+      cassandra-init:
+        condition: service_completed_successfully
+      mongodb:
+        condition: service_healthy
+    environment:
+      CASSANDRA_CONTACT_POINTS: cassandra
+      CASSANDRA_DC: datacenter1
+      CASSANDRA_KEYSPACE: tollbooth
+      MONGO_URI: mongodb://mongodb:27017
+      MONGO_DB: tollbooth
+      PROJECT_ID: default
+    restart: unless-stopped
+
   # Synthetic traffic generator. Not a long-running service — run on demand:
   #   docker compose run --rm loadgen --rps 50 --duration 10
   # The "tools" profile keeps it out of a plain `docker compose up`.
