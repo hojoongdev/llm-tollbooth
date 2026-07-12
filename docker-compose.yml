@@ -159,6 +159,18 @@ services:
       # GATEWAY_DEFAULT_KEY pins that key so it survives a restart.
       AUTH_MODE: ${AUTH_MODE:-none}
       GATEWAY_DEFAULT_KEY: ${GATEWAY_DEFAULT_KEY:-}
+      # Real providers. A model whose provider has no key here is served by the
+      # mock instead — which is why the stack works on a fresh clone, and why
+      # switching to the real thing is one line in .env and nothing else.
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-https://api.anthropic.com/v1}
+      # Any OpenAI-compatible server you run yourself (vLLM, Ollama). The URL
+      # alone enables it — most want no key.
+      SELFHOST_BASE_URL: ${SELFHOST_BASE_URL:-}
+      SELFHOST_API_KEY: ${SELFHOST_API_KEY:-}
+      PROVIDER_TIMEOUT_MS: ${PROVIDER_TIMEOUT_MS:-60000}
       # Mock provider: the fake LLM that makes the stack demo-able with no real
       # API key. Set MOCK_LATENCY_MS=0 to measure the gateway's own overhead.
       MOCK_LATENCY_MS: ${MOCK_LATENCY_MS:-250}
@@ -166,6 +178,10 @@ services:
       # Response cache. Off by default — caching changes what a call means, so
       # it's the operator's call. Set a TTL in seconds to turn it on.
       CACHE_TTL_SECONDS: ${CACHE_TTL_SECONDS:-0}
+    extra_hosts:
+      # So a self-hosted provider running on the host (say vLLM on your laptop)
+      # is reachable from in here as host.docker.internal.
+      - "host.docker.internal:host-gateway"
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health >/dev/null 2>&1"]
       interval: 10s

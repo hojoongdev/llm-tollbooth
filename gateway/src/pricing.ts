@@ -111,3 +111,12 @@ export async function costOf(model: string, usage: Usage): Promise<number> {
 export async function knownModels(): Promise<Price[]> {
   return [...(await table()).values()];
 }
+
+/**
+ * Who owns this model. The table has to know in order to price the call, so it
+ * doubles as the gateway's routing table (see providers/index.ts) instead of
+ * there being a second list to keep in sync with this one.
+ */
+export async function providerForModel(model: string): Promise<string | null> {
+  return (await table()).get(model)?.provider ?? null;
+}

@@ -34,7 +34,9 @@ export function registerChat(app: FastifyInstance): void {
     if (invalid) return reply.code(400).send(invalid);
 
     const chat = body as ChatRequest;
-    const provider = resolveProvider(chat.model);
+    // Reads the pricing table, which is cached in memory — the routing decision
+    // does not cost a database round-trip.
+    const provider = await resolveProvider(chat.model);
     const eventId = randomUUID();
     const startedAt = performance.now();
 

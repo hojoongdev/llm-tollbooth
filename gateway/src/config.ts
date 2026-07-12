@@ -53,6 +53,21 @@ export const AUTH_MODE = process.env.AUTH_MODE ?? "none";
 /** Pins that auto-provisioned key across restarts. Empty => a fresh random one. */
 export const DEFAULT_KEY = process.env.GATEWAY_DEFAULT_KEY ?? "";
 
+// --- Real providers ---
+// A provider with no key configured simply isn't registered, and its models fall
+// through to the mock (providers/index.ts). That is what makes "clone it and it
+// works" true, and turning on the real thing a one-line .env change.
+export const OPENAI_API_KEY = process.env.OPENAI_API_KEY ?? "";
+export const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL ?? "https://api.openai.com/v1";
+export const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY ?? "";
+export const ANTHROPIC_BASE_URL = process.env.ANTHROPIC_BASE_URL ?? "https://api.anthropic.com/v1";
+/** Any OpenAI-compatible server you host yourself (vLLM, Ollama). URL alone enables it. */
+export const SELFHOST_BASE_URL = process.env.SELFHOST_BASE_URL ?? "";
+export const SELFHOST_API_KEY = process.env.SELFHOST_API_KEY ?? "";
+
+/** A provider that has stopped answering must not hold our caller's socket open. */
+export const PROVIDER_TIMEOUT_MS = int(process.env.PROVIDER_TIMEOUT_MS, 60_000);
+
 // --- Mock provider ---
 // The built-in fake LLM that lets the whole stack demo without a provider key.
 // Latency is configurable because it is also the baseline we subtract when
