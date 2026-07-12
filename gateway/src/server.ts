@@ -1,6 +1,7 @@
 import Fastify from "fastify";
 
 import { startBudgets } from "./budget.js";
+import { initCache } from "./cache.js";
 import { closeCassandra, connectCassandra } from "./cassandra.js";
 import { HOST, LOG_LEVEL, PORT } from "./config.js";
 import { connectKafka, disconnectKafka } from "./kafka.js";
@@ -28,6 +29,7 @@ async function main(): Promise<void> {
   await connectMongo();
   await initKeys(app.log);
   await initPricing(app.log);
+  await initCache(app.log);
   initRequests(app.log);
   await connectKafka(app.log);
   await connectCassandra(app.log);

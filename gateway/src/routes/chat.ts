@@ -3,6 +3,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 
 import { authenticate } from "../auth.js";
 import { checkLimits, recordSpend } from "../budget.js";
+import { cacheGet, cacheKey, cachePut } from "../cache.js";
 import { errorBody, GatewayError } from "../errors.js";
 import type { LlmEvent } from "../event.js";
 import { publishEvent } from "../kafka.js";
@@ -93,6 +94,25 @@ export function registerChat(app: FastifyInstance): void {
         );
     }
 
+    // Served from the cache, if we've answered this exact question before. It is
+    // recorded like any other call — tokens and all — but at zero cost, because
+    // nothing was bought. That is what makes the cache's value legible in the
+    // console rather than showing up as traffic that mysteriously vanished.
+    const cacheId = cacheKey(chat);
+    const cached = await cacheGet(cacheId);
+    if (cached) {
+      record({
+        status: "cached",
+        cache_hit: true,
+        prompt_tokens: cached.usage.prompt_tokens,
+        completion_tokens: cached.usage.completion_tokens,
+        cost_usd: 0,
+        latency_ms: Math.round(performance.now() - startedAt),
+      });
+      storeRequest(eventId, chat, cached, null);
+      return cached;
+    }
+
     try {
       const { response, ttfbMs } = await provider.chat(chat);
       const usage = response.usage;
@@ -110,6 +130,7 @@ export function registerChat(app: FastifyInstance): void {
       // Charge it against the budget now, not when the rollup catches up — the
       // very next call has to see this money as already spent.
       recordSpend(key._id, cost);
+      cachePut(cacheId, chat, response);
 
       return response;
     } catch (err) {

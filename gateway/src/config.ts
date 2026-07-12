@@ -37,6 +37,13 @@ export const CASSANDRA_KEYSPACE = process.env.CASSANDRA_KEYSPACE ?? "tollbooth";
 export const BUDGET_RECONCILE_SECONDS = int(process.env.BUDGET_RECONCILE_SECONDS, 20);
 
 /**
+ * Response cache TTL. 0 = off, which is the default on purpose: a cache changes
+ * what a call means (ask twice at temperature 1 and you are supposed to get two
+ * answers), so it is the operator's call to make, not ours.
+ */
+export const CACHE_TTL_SECONDS = int(process.env.CACHE_TTL_SECONDS, 0);
+
+/**
  * Spec §6. Note this only describes how *humans* get into the console — calls to
  * the gateway always need an API key. `none` means nobody logs in to issue one,
  * so the gateway provisions a default key itself (see keys.ts).

@@ -163,6 +163,9 @@ services:
       # API key. Set MOCK_LATENCY_MS=0 to measure the gateway's own overhead.
       MOCK_LATENCY_MS: ${MOCK_LATENCY_MS:-250}
       MOCK_ERROR_RATE: ${MOCK_ERROR_RATE:-0}
+      # Response cache. Off by default — caching changes what a call means, so
+      # it's the operator's call. Set a TTL in seconds to turn it on.
+      CACHE_TTL_SECONDS: ${CACHE_TTL_SECONDS:-0}
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health >/dev/null 2>&1"]
       interval: 10s
