@@ -9,7 +9,7 @@ services:
     image: apache/kafka:3.9.0
     container_name: llm-tollbooth-kafka
     ports:
-      - "9092:9092" # host tools reach the broker on localhost:9092
+      - "${KAFKA_EXTERNAL_PORT:-9092}:9092" # host tools reach the broker on localhost:9092
     environment:
       # KRaft: this single node is both broker and controller (no ZooKeeper).
       KAFKA_NODE_ID: 1
@@ -65,7 +65,7 @@ services:
     image: cassandra:5.0
     container_name: llm-tollbooth-cassandra
     ports:
-      - "9042:9042" # CQL
+      - "${CASSANDRA_PORT:-9042}:9042" # CQL
     environment:
       CASSANDRA_CLUSTER_NAME: llm-tollbooth
       # Cassandra grabs ~1/4 of host RAM by default. Cap it so it can share a
@@ -81,13 +81,27 @@ services:
       retries: 12
       start_period: 90s
 
+  # One-shot: waits for Cassandra, applies the keyspace/schema, then exits. The
+  # cassandra image has no init-script hook (unlike mongo), so we apply it here.
+  # Mirrors the kafka-init pattern. init.cql is idempotent (IF NOT EXISTS).
+  cassandra-init:
+    image: cassandra:5.0
+    container_name: llm-tollbooth-cassandra-init
+    depends_on:
+      cassandra:
+        condition: service_healthy
+    volumes:
+      - ./infra/cassandra/init.cql:/init.cql:ro
+    entrypoint: ["cqlsh", "cassandra", "-f", "/init.cql"]
+    restart: "no"
+
   # Flexible document store: full prompt/response bodies, rules, API keys and
   # pricing — anything whose shape varies from one request to the next.
   mongodb:
     image: mongo:7
     container_name: llm-tollbooth-mongo
     ports:
-      - "27017:27017"
+      - "${MONGO_PORT:-27017}:27017"
     volumes:
       - mongo_data:/data/db
     healthcheck:
@@ -104,11 +118,12 @@ services:
     image: axllent/mailpit:latest
     container_name: llm-tollbooth-mailpit
     ports:
-      - "8025:8025" # web UI
-      - "1025:1025" # SMTP endpoint the workers send to
+      - "${MAILPIT_UI_PORT:-8025}:8025" # web UI
+      - "${MAILPIT_SMTP_PORT:-1025}:1025" # SMTP endpoint the workers send to
 
-  # Ingest worker: consumes llm.events off the topic. In P1 it just logs each
-  # event to prove the pipeline; P2 makes it write to Cassandra + MongoDB.
+  # Ingest worker: consumes llm.events and persists it off the hot path — raw
+  # rows + hourly rollups to Cassandra, request documents to MongoDB (P2).
+  # Waits for the schema (cassandra-init) before it starts writing.
   ingest:
     build: ./workers/ingest
     image: llm-tollbooth/ingest
@@ -116,10 +131,52 @@ services:
     depends_on:
       kafka:
         condition: service_healthy
+      cassandra:
+        condition: service_healthy
+      cassandra-init:
+        condition: service_completed_successfully
+      mongodb:
+        condition: service_healthy
     environment:
       KAFKA_BOOTSTRAP: kafka:29092
       KAFKA_TOPIC: llm.events
       KAFKA_GROUP_ID: ingest
+      CASSANDRA_CONTACT_POINTS: cassandra
+      CASSANDRA_KEYSPACE: tollbooth
+      MONGO_URI: mongodb://mongodb:27017
+      MONGO_DB: tollbooth
+    restart: unless-stopped
+
+  # Console + read API. Server components read hourly rollups from Cassandra
+  # (trends/cards) and request documents from MongoDB (log + detail). P2 ships
+  # the Overview and Requests screens.
+  dashboard:
+    build: ./dashboard
+    image: llm-tollbooth/dashboard
+    container_name: llm-tollbooth-dashboard
+    ports:
+      - "${DASHBOARD_PORT:-3000}:3000"
+    depends_on:
+      cassandra:
+        condition: service_healthy
+      cassandra-init:
+        condition: service_completed_successfully
+      mongodb:
+        condition: service_healthy
+    environment:
+      CASSANDRA_CONTACT_POINTS: cassandra
+      CASSANDRA_DC: datacenter1
+      CASSANDRA_KEYSPACE: tollbooth
+      MONGO_URI: mongodb://mongodb:27017
+      MONGO_DB: tollbooth
+      PROJECT_ID: default
+      # Console login (spec §6). Empty by default => open console; set AUTH_MODE=single
+      # plus the three values below in .env to require a login. No code changes.
+      AUTH_MODE: ${AUTH_MODE:-none}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      SESSION_SECRET: ${SESSION_SECRET:-}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
     restart: unless-stopped
 
   # Synthetic traffic generator. Not a long-running service — run on demand:

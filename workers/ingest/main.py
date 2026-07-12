@@ -1,7 +1,25 @@
-"""ingest worker — consume llm.events and log each one.
+"""ingest worker — consume llm.events and persist them.
 
-P1 scope: prove the pipeline end to end (loadgen -> Kafka -> worker). Persisting
-to Cassandra/MongoDB comes in P2; here we just subscribe and print.
+P2 scope: every event is written three ways, all off the gateway's hot path.
+
+  Cassandra  metrics_by_model / metrics_by_key  — one raw row per event, so the
+             dashboard can drill into "recent calls for model/key X today".
+  Cassandra  rollup_hourly                       — hourly counters (cost, requests,
+             errors, tokens, latency sum, cache hits) per breakdown axis. These
+             feed the trend charts, which never scan the raw tables.
+  MongoDB    requests                            — the event as a document, so the
+             Requests screen has rows to list and a detail to open. Once the real
+             gateway lands (P3) this doc also carries the prompt/response bodies.
+
+Throughput & correctness:
+  - Events are buffered and flushed in batches (by size or a time interval). The
+    win is on the counters: many events collapse into a handful of counter
+    UPDATEs per (dim, hour) bucket instead of one round-trip each.
+  - Kafka offsets are committed manually, only *after* a flush succeeds. So a
+    crash re-processes at most one buffer — at-least-once. Raw inserts and the
+    Mongo upsert are keyed by event_id and idempotent under replay; the rollup
+    counters are not, so a crash mid-flush can slightly over-count a bucket. That
+    trade (cheap reads, rare small drift) is acceptable for dashboards.
 """
 
 from __future__ import annotations
@@ -10,12 +28,38 @@ import json
 import os
 import signal
 import sys
+import time
+import uuid
+from collections import defaultdict
+from datetime import date, datetime, timezone
 
+from cassandra.cluster import Cluster, Session
+from cassandra.query import PreparedStatement
 from confluent_kafka import Consumer, KafkaError
+from pymongo import MongoClient, ReplaceOne
 
+# --- Kafka ---
 TOPIC = os.environ.get("KAFKA_TOPIC", "llm.events")
 GROUP_ID = os.environ.get("KAFKA_GROUP_ID", "ingest")
 BOOTSTRAP = os.environ.get("KAFKA_BOOTSTRAP", "localhost:9092")
+
+# --- Cassandra ---
+CASSANDRA_CONTACT_POINTS = os.environ.get("CASSANDRA_CONTACT_POINTS", "localhost").split(",")
+CASSANDRA_PORT = int(os.environ.get("CASSANDRA_PORT", "9042"))
+CASSANDRA_KEYSPACE = os.environ.get("CASSANDRA_KEYSPACE", "tollbooth")
+
+# --- MongoDB ---
+MONGO_URI = os.environ.get("MONGO_URI", "mongodb://localhost:27017")
+MONGO_DB = os.environ.get("MONGO_DB", "tollbooth")
+# requests can grow without bound, so age them out with a TTL index (spec 7.3).
+REQUESTS_TTL_DAYS = int(os.environ.get("REQUESTS_TTL_DAYS", "30"))
+
+# --- Batching ---
+# Flush when the buffer hits this many events, or this many seconds have passed
+# since the last flush — whichever comes first. The time bound keeps low-traffic
+# events from sitting in the buffer indefinitely.
+BATCH_SIZE = int(os.environ.get("INGEST_BATCH_SIZE", "500"))
+FLUSH_SECONDS = float(os.environ.get("INGEST_FLUSH_SECONDS", "5"))
 
 _running = True
 
@@ -25,67 +69,279 @@ def _stop(*_args) -> None:
     _running = False
 
 
-def build_consumer() -> Consumer:
-    return Consumer(
-        {
-            "bootstrap.servers": BOOTSTRAP,
-            "group.id": GROUP_ID,
-            # Start from the beginning the first time this group runs, so a fresh
-            # demo sees events already sitting in the topic.
-            "auto.offset.reset": "earliest",
-            # Commit read positions periodically; on restart we resume, not replay.
-            "enable.auto.commit": True,
-        }
-    )
+# --------------------------------------------------------------------------- #
+# Connections
+# --------------------------------------------------------------------------- #
+def connect_cassandra() -> tuple[Cluster, Session]:
+    """Connect to Cassandra, retrying while it (or the schema) comes up.
+
+    Compose already waits for cassandra-init to finish before starting this
+    worker, but we retry anyway so the worker is robust when run standalone.
+    """
+    last_err: Exception | None = None
+    for attempt in range(30):
+        try:
+            cluster = Cluster(CASSANDRA_CONTACT_POINTS, port=CASSANDRA_PORT)
+            session = cluster.connect(CASSANDRA_KEYSPACE)
+            return cluster, session
+        except Exception as exc:  # noqa: BLE001 — surface any driver/connection error and retry
+            last_err = exc
+            print(f"ingest: waiting for Cassandra ({attempt + 1}/30): {exc}", flush=True)
+            time.sleep(2)
+    raise RuntimeError(f"could not connect to Cassandra: {last_err}")
 
 
-def handle(event: dict) -> None:
-    """P1: just log. P2 will fan this out to Cassandra + MongoDB writers."""
-    status = event.get("status")
-    marker = "ok " if status == "success" else "ERR"
+def connect_mongo():
+    client = MongoClient(MONGO_URI)
+    requests = client[MONGO_DB]["requests"]
+    # TTL indexes act on a BSON date field, so we store `ts` as a real datetime
+    # (see normalize()). Idempotent: create_index is a no-op if it already exists.
+    requests.create_index("ts", expireAfterSeconds=REQUESTS_TTL_DAYS * 86400)
+    return client, requests
+
+
+def prepare(session: Session) -> dict[str, PreparedStatement]:
+    return {
+        "by_model": session.prepare(
+            "INSERT INTO metrics_by_model "
+            "(project_id, model, day, ts, event_id, cost_usd, prompt_tokens, "
+            " completion_tokens, latency_ms, status, cache_hit) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        ),
+        "by_key": session.prepare(
+            "INSERT INTO metrics_by_key "
+            "(project_id, api_key_id, day, ts, event_id, cost_usd, total_tokens, "
+            " latency_ms, status) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        ),
+        # Counter tables are updated, never inserted. The SET deltas bind first,
+        # then the partition/row key in the WHERE clause.
+        "rollup": session.prepare(
+            "UPDATE rollup_hourly SET "
+            "cost_micros = cost_micros + ?, requests = requests + ?, "
+            "errors = errors + ?, prompt_tokens = prompt_tokens + ?, "
+            "completion_tokens = completion_tokens + ?, "
+            "latency_sum_ms = latency_sum_ms + ?, cache_hits = cache_hits + ? "
+            "WHERE project_id = ? AND dim = ? AND day = ? AND hour = ?"
+        ),
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Event parsing
+# --------------------------------------------------------------------------- #
+def _parse_ts(raw: str | None) -> datetime:
+    if raw:
+        try:
+            dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+        except ValueError:
+            pass
+    return datetime.now(timezone.utc)
+
+
+def normalize(event: dict) -> dict:
+    """Coerce a raw event into the exact types Cassandra/Mongo want, and derive
+    the day/hour buckets (UTC) the rollup is keyed by."""
+    ts = _parse_ts(event.get("ts"))
+
+    try:
+        event_id = uuid.UUID(str(event.get("event_id")))
+    except (ValueError, TypeError):
+        event_id = uuid.uuid4()
+
+    prompt_tokens = int(event.get("prompt_tokens") or 0)
+    completion_tokens = int(event.get("completion_tokens") or 0)
+    cost_usd = float(event.get("cost_usd") or 0.0)
+    status = event.get("status") or "unknown"
+
+    return {
+        "event_id": event_id,
+        "event_id_str": str(event_id),
+        "ts": ts,
+        "day": ts.date(),
+        "hour": ts.hour,
+        "project_id": event.get("project_id") or "default",
+        "api_key_id": event.get("api_key_id") or "unknown",
+        "provider": event.get("provider"),
+        "model": event.get("model") or "unknown",
+        "endpoint": event.get("endpoint"),
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": prompt_tokens + completion_tokens,
+        "cost_usd": cost_usd,
+        # Counters are integer-only; money rides as micro-dollars (see init.cql).
+        "cost_micros": round(cost_usd * 1_000_000),
+        "latency_ms": int(event.get("latency_ms") or 0),
+        "ttfb_ms": event.get("ttfb_ms"),
+        "status": status,
+        # "cached" counts as a hit, not an error; anything not success/cached is an error.
+        "is_error": status not in ("success", "cached"),
+        "cache_hit": bool(event.get("cache_hit")),
+        "error_type": event.get("error_type"),
+        "feature_tag": event.get("feature_tag"),
+    }
+
+
+def _mongo_doc(e: dict) -> dict:
+    return {
+        "_id": e["event_id_str"],
+        "ts": e["ts"],
+        "project_id": e["project_id"],
+        "api_key_id": e["api_key_id"],
+        "provider": e["provider"],
+        "model": e["model"],
+        "endpoint": e["endpoint"],
+        "prompt_tokens": e["prompt_tokens"],
+        "completion_tokens": e["completion_tokens"],
+        "total_tokens": e["total_tokens"],
+        "cost_usd": e["cost_usd"],
+        "latency_ms": e["latency_ms"],
+        "ttfb_ms": e["ttfb_ms"],
+        "status": e["status"],
+        "cache_hit": e["cache_hit"],
+        "error_type": e["error_type"],
+        "feature_tag": e["feature_tag"],
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Flush
+# --------------------------------------------------------------------------- #
+def _empty_bucket() -> dict:
+    return {
+        "cost_micros": 0, "requests": 0, "errors": 0, "prompt_tokens": 0,
+        "completion_tokens": 0, "latency_sum_ms": 0, "cache_hits": 0,
+    }
+
+
+def flush(session, stmts, requests_coll, consumer, buffer: list[dict], reason: str) -> None:
+    """Write the buffered events to Cassandra + Mongo, then commit Kafka offsets.
+
+    Raises on any storage failure so offsets are *not* committed — the process
+    exits, restarts, and reprocesses from the last commit (at-least-once).
+    """
+    if not buffer:
+        return
+
+    # 1. Raw rows: fire all inserts async, then wait for them together.
+    futures = []
+    rollup: dict[tuple, dict] = defaultdict(_empty_bucket)
+    mongo_ops = []
+    for e in buffer:
+        futures.append(session.execute_async(stmts["by_model"], (
+            e["project_id"], e["model"], e["day"], e["ts"], e["event_id"],
+            e["cost_usd"], e["prompt_tokens"], e["completion_tokens"],
+            e["latency_ms"], e["status"], e["cache_hit"],
+        )))
+        futures.append(session.execute_async(stmts["by_key"], (
+            e["project_id"], e["api_key_id"], e["day"], e["ts"], e["event_id"],
+            e["cost_usd"], e["total_tokens"], e["latency_ms"], e["status"],
+        )))
+
+        # 2. Fold each event into its rollup buckets (one per breakdown axis).
+        for dim in ("all", f"model:{e['model']}", f"key:{e['api_key_id']}"):
+            b = rollup[(e["project_id"], dim, e["day"], e["hour"])]
+            b["cost_micros"] += e["cost_micros"]
+            b["requests"] += 1
+            b["errors"] += 1 if e["is_error"] else 0
+            b["prompt_tokens"] += e["prompt_tokens"]
+            b["completion_tokens"] += e["completion_tokens"]
+            b["latency_sum_ms"] += e["latency_ms"]
+            b["cache_hits"] += 1 if e["cache_hit"] else 0
+
+        mongo_ops.append(ReplaceOne({"_id": e["event_id_str"]}, _mongo_doc(e), upsert=True))
+
+    for f in futures:
+        f.result()
+
+    # 3. One counter UPDATE per bucket — this is where batching pays off.
+    rollup_futures = [
+        session.execute_async(stmts["rollup"], (
+            b["cost_micros"], b["requests"], b["errors"], b["prompt_tokens"],
+            b["completion_tokens"], b["latency_sum_ms"], b["cache_hits"],
+            project_id, dim, day, hour,
+        ))
+        for (project_id, dim, day, hour), b in rollup.items()
+    ]
+    for f in rollup_futures:
+        f.result()
+
+    # 4. Mongo request documents.
+    if mongo_ops:
+        requests_coll.bulk_write(mongo_ops, ordered=False)
+
+    # 5. Only now is it safe to advance the committed offset.
+    consumer.commit(asynchronous=False)
+
     print(
-        f"[{marker}] {event.get('provider')}/{event.get('model')} "
-        f"tokens={event.get('prompt_tokens')}+{event.get('completion_tokens')} "
-        f"cost=${event.get('cost_usd')} latency={event.get('latency_ms')}ms "
-        f"project={event.get('project_id')} tag={event.get('feature_tag')}",
+        f"ingest: flushed {len(buffer)} events -> "
+        f"{len(rollup)} rollup buckets ({reason})",
         flush=True,
     )
+    buffer.clear()
+
+
+# --------------------------------------------------------------------------- #
+# Main loop
+# --------------------------------------------------------------------------- #
+def build_consumer() -> Consumer:
+    return Consumer({
+        "bootstrap.servers": BOOTSTRAP,
+        "group.id": GROUP_ID,
+        # First run of a fresh group reads the backlog; restarts resume, not replay.
+        "auto.offset.reset": "earliest",
+        # We commit by hand after each successful flush (see flush()).
+        "enable.auto.commit": False,
+    })
 
 
 def main() -> None:
     signal.signal(signal.SIGINT, _stop)
     signal.signal(signal.SIGTERM, _stop)
 
+    cluster, session = connect_cassandra()
+    stmts = prepare(session)
+    mongo_client, requests_coll = connect_mongo()
     consumer = build_consumer()
     consumer.subscribe([TOPIC])
     print(
-        f"ingest: consuming '{TOPIC}' from {BOOTSTRAP} as group '{GROUP_ID}'",
+        f"ingest: consuming '{TOPIC}' from {BOOTSTRAP} as group '{GROUP_ID}' -> "
+        f"Cassandra {CASSANDRA_CONTACT_POINTS}/{CASSANDRA_KEYSPACE}, Mongo {MONGO_DB}",
         flush=True,
     )
 
+    buffer: list[dict] = []
     seen = 0
+    last_flush = time.monotonic()
     try:
         while _running:
             msg = consumer.poll(1.0)
-            if msg is None:
-                continue
-            if msg.error():
-                # End of partition is normal; anything else is worth surfacing.
-                if msg.error().code() != KafkaError._PARTITION_EOF:
-                    print(f"ingest: consumer error: {msg.error()}", file=sys.stderr, flush=True)
-                continue
+            if msg is not None:
+                if msg.error():
+                    # End of partition is normal; anything else is worth surfacing.
+                    if msg.error().code() != KafkaError._PARTITION_EOF:
+                        print(f"ingest: consumer error: {msg.error()}", file=sys.stderr, flush=True)
+                else:
+                    try:
+                        buffer.append(normalize(json.loads(msg.value())))
+                        seen += 1
+                    except (ValueError, TypeError) as exc:
+                        print(f"ingest: skipping bad message: {exc}", file=sys.stderr, flush=True)
 
-            try:
-                event = json.loads(msg.value())
-            except (ValueError, TypeError) as exc:
-                print(f"ingest: skipping bad message: {exc}", file=sys.stderr, flush=True)
-                continue
-
-            handle(event)
-            seen += 1
+            due = (time.monotonic() - last_flush) >= FLUSH_SECONDS
+            if buffer and (len(buffer) >= BATCH_SIZE or due):
+                flush(session, stmts, requests_coll, consumer, buffer, "batch")
+                last_flush = time.monotonic()
     finally:
-        consumer.close()
-        print(f"ingest: shutting down after {seen} events", flush=True)
+        # Drain whatever's buffered so a clean shutdown doesn't strand events.
+        try:
+            flush(session, stmts, requests_coll, consumer, buffer, "shutdown")
+        finally:
+            consumer.close()
+            cluster.shutdown()
+            mongo_client.close()
+            print(f"ingest: shutting down after {seen} events", flush=True)
 
 
 if __name__ == "__main__":
