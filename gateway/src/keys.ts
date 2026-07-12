@@ -15,6 +15,9 @@ export interface ApiKey {
   key_prefix: string;
   status: "active" | "blocked";
   created_at: Date;
+  // Set from the console; enforced here (budget.ts). Absent or null = no limit.
+  budget?: { daily_usd: number | null; monthly_usd: number | null };
+  rate_limit?: { rpm: number | null };
 }
 
 const keys = () => collection<ApiKey>("api_keys");

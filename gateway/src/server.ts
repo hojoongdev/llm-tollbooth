@@ -1,5 +1,7 @@
 import Fastify from "fastify";
 
+import { startBudgets } from "./budget.js";
+import { closeCassandra, connectCassandra } from "./cassandra.js";
 import { HOST, LOG_LEVEL, PORT } from "./config.js";
 import { connectKafka, disconnectKafka } from "./kafka.js";
 import { initKeys } from "./keys.js";
@@ -18,15 +20,21 @@ const app = Fastify({
 });
 
 async function main(): Promise<void> {
-  // Mongo is a hard dependency: without it we cannot authenticate anyone, so
-  // there is nothing to serve and failing to boot is the correct answer. Kafka
-  // is not — connectKafka resolves either way and retries in the background,
-  // because a gateway that can still answer calls should still answer them.
+  // Mongo is the one hard dependency: without it we cannot authenticate anyone,
+  // so there is nothing to serve and failing to boot is the correct answer.
+  // Kafka and Cassandra are not — they resolve either way and retry in the
+  // background, because a gateway that can still answer calls should answer them
+  // rather than turn a bookkeeping outage into an application outage.
   await connectMongo();
   await initKeys(app.log);
   await initPricing(app.log);
   initRequests(app.log);
   await connectKafka(app.log);
+  await connectCassandra(app.log);
+
+  // Before we listen, not after: a restart must not hand every key a fresh
+  // budget, which is exactly what an unseeded tally would do.
+  await startBudgets(app.log);
 
   registerHealth(app);
   registerModels(app);
@@ -43,6 +51,7 @@ for (const signal of ["SIGTERM", "SIGINT"] as const) {
       app.log.info(`${signal} received — shutting down`);
       await app.close();
       await disconnectKafka();
+      await closeCassandra();
       await closeMongo();
       process.exit(0);
     })();

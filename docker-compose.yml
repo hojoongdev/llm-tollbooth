@@ -126,8 +126,9 @@ services:
   # returns the answer, and publishes one llm.events record per call — without
   # ever making the caller wait for that record to land.
   #
-  # It needs Mongo (keys, pricing) to serve at all, and Kafka only to *report*;
-  # with the broker down it keeps answering and drops the events.
+  # It needs Mongo (keys, pricing) to serve at all. Kafka is only how it *reports*
+  # and Cassandra only how it checks a key's spend against the rollups — with
+  # either down it keeps answering calls and says so on /health.
   gateway:
     build: ./gateway
     image: llm-tollbooth/gateway
@@ -139,12 +140,19 @@ services:
         condition: service_healthy
       mongodb:
         condition: service_healthy
+      cassandra:
+        condition: service_healthy
+      cassandra-init:
+        condition: service_completed_successfully
     environment:
       PORT: 8080
       KAFKA_BOOTSTRAP: kafka:29092
       KAFKA_TOPIC: llm.events
       MONGO_URI: mongodb://mongodb:27017
       MONGO_DB: tollbooth
+      CASSANDRA_CONTACT_POINTS: cassandra
+      CASSANDRA_DC: datacenter1
+      CASSANDRA_KEYSPACE: tollbooth
       PROJECT_ID: default
       LOG_LEVEL: ${LOG_LEVEL:-info}
       # AUTH_MODE=none => the gateway mints its own API key at boot and prints it.

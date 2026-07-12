@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 
 import { authenticate } from "../auth.js";
+import { checkLimits, recordSpend } from "../budget.js";
 import { errorBody, GatewayError } from "../errors.js";
 import type { LlmEvent } from "../event.js";
 import { publishEvent } from "../kafka.js";
@@ -65,29 +66,50 @@ export function registerChat(app: FastifyInstance): void {
         ...patch,
       });
 
+    // Keep the prompt of any refused call: "what was this key trying to do when
+    // it got cut off?" is the first question its owner asks.
     if (key.status === "blocked") {
       record({ status: "blocked", error_type: "key_blocked" });
-      // Keep the prompt of a refused call: "what was this key trying to do when
-      // it got cut off?" is the first question its owner will ask.
       storeRequest(eventId, chat, null, "blocked: key_blocked");
       return reply
         .code(403)
         .send(errorBody("This API key is blocked.", "invalid_request_error", "key_blocked"));
     }
 
+    // Out of money, or going too fast. Both are decided from memory — no database
+    // sits between the caller and their answer (spec §14).
+    const verdict = checkLimits(key);
+    if (!verdict.allowed) {
+      record({ status: "blocked", error_type: verdict.reason });
+      storeRequest(eventId, chat, null, `blocked: ${verdict.reason}`);
+      return reply
+        .code(429)
+        .send(
+          errorBody(
+            verdict.message,
+            verdict.reason === "rate_limited" ? "rate_limit_error" : "insufficient_quota",
+            verdict.reason,
+          ),
+        );
+    }
+
     try {
       const { response, ttfbMs } = await provider.chat(chat);
       const usage = response.usage;
+      const cost = await costOf(chat.model, usage);
 
       record({
         status: "success",
         prompt_tokens: usage.prompt_tokens,
         completion_tokens: usage.completion_tokens,
-        cost_usd: await costOf(chat.model, usage),
+        cost_usd: cost,
         latency_ms: Math.round(performance.now() - startedAt),
         ttfb_ms: ttfbMs,
       });
       storeRequest(eventId, chat, response, null);
+      // Charge it against the budget now, not when the rollup catches up — the
+      // very next call has to see this money as already spent.
+      recordSpend(key._id, cost);
 
       return response;
     } catch (err) {

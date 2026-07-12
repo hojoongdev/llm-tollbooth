@@ -28,6 +28,14 @@ export const KAFKA_TOPIC = process.env.KAFKA_TOPIC ?? "llm.events";
 export const MONGO_URI = process.env.MONGO_URI ?? "mongodb://localhost:27017";
 export const MONGO_DB = process.env.MONGO_DB ?? "tollbooth";
 
+// Read-only, and for one purpose: how much a key has already spent (budget.ts).
+export const CASSANDRA_CONTACT_POINTS = process.env.CASSANDRA_CONTACT_POINTS ?? "localhost";
+export const CASSANDRA_DC = process.env.CASSANDRA_DC ?? "datacenter1";
+export const CASSANDRA_KEYSPACE = process.env.CASSANDRA_KEYSPACE ?? "tollbooth";
+
+/** How often the in-memory spend tally is re-checked against the rollups. */
+export const BUDGET_RECONCILE_SECONDS = int(process.env.BUDGET_RECONCILE_SECONDS, 20);
+
 /**
  * Spec §6. Note this only describes how *humans* get into the console — calls to
  * the gateway always need an API key. `none` means nobody logs in to issue one,
