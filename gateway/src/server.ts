@@ -5,6 +5,7 @@ import { connectKafka, disconnectKafka } from "./kafka.js";
 import { initKeys } from "./keys.js";
 import { closeMongo, connectMongo } from "./mongo.js";
 import { initPricing } from "./pricing.js";
+import { initRequests } from "./requests.js";
 import { registerChat } from "./routes/chat.js";
 import { registerHealth } from "./routes/health.js";
 import { registerModels } from "./routes/models.js";
@@ -24,6 +25,7 @@ async function main(): Promise<void> {
   await connectMongo();
   await initKeys(app.log);
   await initPricing(app.log);
+  initRequests(app.log);
   await connectKafka(app.log);
 
   registerHealth(app);

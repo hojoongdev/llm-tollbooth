@@ -125,7 +125,29 @@ export async function listRequests(f: RequestFilter): Promise<RequestRow[]> {
   return docs.map(toRow);
 }
 
-export async function getRequest(id: string): Promise<RequestRow | null> {
+export interface RequestDetail extends RequestRow {
+  /** The prompt, as sent. Null for synthetic loadgen events, which carry no bodies. */
+  messages: Array<{ role: string; content: string }> | null;
+  answer: string | null;
+  error: string | null;
+}
+
+/**
+ * One request, metrics *and* bodies.
+ *
+ * Two writers fill this document: the gateway stores the prompt/response the
+ * moment the call ends, the ingest worker merges the metrics in when it flushes
+ * its batch. Either can be the one that hasn't landed yet, so every field here
+ * is treated as optional.
+ */
+export async function getRequest(id: string): Promise<RequestDetail | null> {
   const doc = await db().collection("requests").findOne({ _id: id as never });
-  return doc ? toRow(doc) : null;
+  if (!doc) return null;
+
+  return {
+    ...toRow(doc),
+    messages: doc.request?.messages ?? null,
+    answer: doc.response?.content ?? null,
+    error: doc.error ?? null,
+  };
 }

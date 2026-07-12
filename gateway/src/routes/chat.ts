@@ -8,6 +8,7 @@ import { publishEvent } from "../kafka.js";
 import { costOf } from "../pricing.js";
 import { resolveProvider } from "../providers/index.js";
 import type { ChatRequest } from "../providers/types.js";
+import { storeRequest } from "../requests.js";
 
 const ENDPOINT = "/v1/chat/completions";
 
@@ -57,13 +58,18 @@ export function registerChat(app: FastifyInstance): void {
         status: "error",
         cache_hit: false,
         error_type: null,
-        request_doc_id: null,
+        // The bodies live in Mongo `requests` under this same id — the metrics
+        // and the text they describe converge on one document.
+        request_doc_id: eventId,
         feature_tag: featureTag(req, chat),
         ...patch,
       });
 
     if (key.status === "blocked") {
       record({ status: "blocked", error_type: "key_blocked" });
+      // Keep the prompt of a refused call: "what was this key trying to do when
+      // it got cut off?" is the first question its owner will ask.
+      storeRequest(eventId, chat, null, "blocked: key_blocked");
       return reply
         .code(403)
         .send(errorBody("This API key is blocked.", "invalid_request_error", "key_blocked"));
@@ -81,6 +87,7 @@ export function registerChat(app: FastifyInstance): void {
         latency_ms: Math.round(performance.now() - startedAt),
         ttfb_ms: ttfbMs,
       });
+      storeRequest(eventId, chat, response, null);
 
       return response;
     } catch (err) {
@@ -90,6 +97,7 @@ export function registerChat(app: FastifyInstance): void {
           : new GatewayError("provider_error", err instanceof Error ? err.message : String(err));
 
       record({ status: "error", error_type: failure.type });
+      storeRequest(eventId, chat, null, failure.message);
       req.log.warn({ err, model: chat.model }, "upstream call failed");
 
       return reply.code(failure.status).send(errorBody(failure.message, "api_error", failure.type));

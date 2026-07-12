@@ -7,9 +7,13 @@ P2 scope: every event is written three ways, all off the gateway's hot path.
   Cassandra  rollup_hourly                       — hourly counters (cost, requests,
              errors, tokens, latency sum, cache hits) per breakdown axis. These
              feed the trend charts, which never scan the raw tables.
-  MongoDB    requests                            — the event as a document, so the
-             Requests screen has rows to list and a detail to open. Once the real
-             gateway lands (P3) this doc also carries the prompt/response bodies.
+  MongoDB    requests                            — the event's metrics merged into
+             the request document, so the Requests screen has rows to list and a
+             detail to open. The gateway writes the prompt/response bodies to the
+             same document (keyed by event_id) the moment the call finishes, so we
+             merge with $set rather than replacing: a ReplaceOne here would delete
+             the bodies, and the two writers race by nature. Synthetic loadgen
+             events have no bodies — those documents are metrics only.
 
 Throughput & correctness:
   - Events are buffered and flushed in batches (by size or a time interval). The
@@ -36,7 +40,7 @@ from datetime import date, datetime, timezone
 from cassandra.cluster import Cluster, Session
 from cassandra.query import PreparedStatement
 from confluent_kafka import Consumer, KafkaError
-from pymongo import MongoClient, ReplaceOne
+from pymongo import MongoClient, UpdateOne
 
 # --- Kafka ---
 TOPIC = os.environ.get("KAFKA_TOPIC", "llm.events")
@@ -184,8 +188,13 @@ def normalize(event: dict) -> dict:
 
 
 def _mongo_doc(e: dict) -> dict:
+    """The metrics half of a request document.
+
+    No `_id`: on an upsert Mongo takes it from the filter, and naming the
+    immutable field in $set is an error. The other half — the prompt and the
+    response — is written by the gateway under the same key.
+    """
     return {
-        "_id": e["event_id_str"],
         "ts": e["ts"],
         "project_id": e["project_id"],
         "api_key_id": e["api_key_id"],
@@ -250,7 +259,11 @@ def flush(session, stmts, requests_coll, consumer, buffer: list[dict], reason: s
             b["latency_sum_ms"] += e["latency_ms"]
             b["cache_hits"] += 1 if e["cache_hit"] else 0
 
-        mongo_ops.append(ReplaceOne({"_id": e["event_id_str"]}, _mongo_doc(e), upsert=True))
+        # $set, not a replace: the gateway owns the prompt/response fields of this
+        # same document and may have written them a moment ago (or be about to).
+        mongo_ops.append(
+            UpdateOne({"_id": e["event_id_str"]}, {"$set": _mongo_doc(e)}, upsert=True)
+        )
 
     for f in futures:
         f.result()
