@@ -1,7 +1,7 @@
 "use client";
 
 import { usePathname } from "next/navigation";
-import { KeyRound, LayoutDashboard, LogOut, ScrollText, TrafficCone, type LucideIcon } from "lucide-react";
+import { CircleDollarSign, KeyRound, LayoutDashboard, LogOut, ScrollText, TrafficCone, type LucideIcon } from "lucide-react";
 
 import { logout } from "@/app/login/actions";
 import { PROJECT } from "@/lib/config";
@@ -36,7 +36,10 @@ const NAV: { section: string; items: NavItem[] }[] = [
   },
   {
     section: "Gateway",
-    items: [{ href: "/keys", label: "API Keys", icon: KeyRound }],
+    items: [
+      { href: "/keys", label: "API Keys", icon: KeyRound },
+      { href: "/pricing", label: "Pricing", icon: CircleDollarSign },
+    ],
   },
 ];
 
