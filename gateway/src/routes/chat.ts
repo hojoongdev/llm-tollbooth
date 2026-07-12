@@ -100,6 +100,12 @@ export function registerChat(app: FastifyInstance): void {
     // recorded like any other call — tokens and all — but at zero cost, because
     // nothing was bought. That is what makes the cache's value legible in the
     // console rather than showing up as traffic that mysteriously vanished.
+    // The caller gets told which call this was, and whether they paid for it.
+    // The event id is what they'd search for in the console; the cache header is
+    // the convention every CDN and proxy already uses, so tooling understands it
+    // for free — and it is how loadgen counts hits when measuring the cache.
+    void reply.header("x-tollbooth-event-id", eventId);
+
     const cacheId = cacheKey(chat);
     const cached = await cacheGet(cacheId);
     if (cached) {
@@ -112,8 +118,10 @@ export function registerChat(app: FastifyInstance): void {
         latency_ms: Math.round(performance.now() - startedAt),
       });
       storeRequest(eventId, chat, cached, null);
+      void reply.header("x-tollbooth-cache", "hit");
       return cached;
     }
+    void reply.header("x-tollbooth-cache", "miss");
 
     try {
       const { response, ttfbMs } = await provider.chat(chat);

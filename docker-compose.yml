@@ -172,8 +172,10 @@ services:
       SELFHOST_API_KEY: ${SELFHOST_API_KEY:-}
       PROVIDER_TIMEOUT_MS: ${PROVIDER_TIMEOUT_MS:-60000}
       # Mock provider: the fake LLM that makes the stack demo-able with no real
-      # API key. Set MOCK_LATENCY_MS=0 to measure the gateway's own overhead.
+      # API key. Zero *both* latency knobs to measure the gateway's own overhead —
+      # leaving the jitter behind is measuring the jitter.
       MOCK_LATENCY_MS: ${MOCK_LATENCY_MS:-250}
+      MOCK_JITTER_MS: ${MOCK_JITTER_MS:-150}
       MOCK_ERROR_RATE: ${MOCK_ERROR_RATE:-0}
       # Response cache. Off by default — caching changes what a call means, so
       # it's the operator's call. Set a TTL in seconds to turn it on.
@@ -249,7 +251,8 @@ services:
     restart: unless-stopped
 
   # Synthetic traffic generator. Not a long-running service — run on demand:
-  #   docker compose run --rm loadgen --rps 50 --duration 10
+  #   docker compose run --rm loadgen --rps 50 --duration 10                    # mode 1: load the pipeline
+  #   docker compose run --rm loadgen --mode gateway --api-key tb_… --rps 50    # mode 2: load the gateway
   # The "tools" profile keeps it out of a plain `docker compose up`.
   loadgen:
     build: ./loadgen
@@ -260,6 +263,8 @@ services:
         condition: service_healthy
     environment:
       KAFKA_BOOTSTRAP: kafka:29092
+      GATEWAY_URL: http://gateway:8080
+      GATEWAY_API_KEY: ${GATEWAY_API_KEY:-}
 
 volumes:
   cassandra_data:

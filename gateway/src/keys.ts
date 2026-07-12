@@ -107,7 +107,11 @@ async function ensureDefaultKey(log: FastifyBaseLogger): Promise<void> {
   );
   invalidateKeyCache();
 
-  log.info(
+  // Deliberately a warning, not an info line. Running on a key the gateway minted
+  // for itself *is* something to be warned about — and it means raising LOG_LEVEL
+  // to quiet the per-request logs (as a load test does) can't hide the one line
+  // you need to make any call at all.
+  log.warn(
     { key: raw, pinned: Boolean(DEFAULT_KEY) },
     "AUTH_MODE=none — demo API key (local demos only; issue keys from the console " +
       "for anything exposed, or pin this one with GATEWAY_DEFAULT_KEY)",
