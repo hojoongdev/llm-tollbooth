@@ -6,7 +6,7 @@ import type { Window } from "./time";
 
 const g = globalThis as unknown as { __mongo?: MongoClient };
 
-function db(): Db {
+export function db(): Db {
   if (!g.__mongo) {
     g.__mongo = new MongoClient(process.env.MONGO_URI || "mongodb://localhost:27017");
   }
