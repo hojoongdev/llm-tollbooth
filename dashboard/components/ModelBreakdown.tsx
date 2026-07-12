@@ -1,6 +1,6 @@
 import Link from "next/link";
 
-import type { ModelRow } from "@/lib/mongo";
+import type { ModelRow } from "@/lib/cassandra";
 import { count, pct, usd } from "@/lib/format";
 import { Card, CardContent, CardHeader, CardTitle } from "./ui/card";
 

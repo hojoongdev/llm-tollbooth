@@ -128,6 +128,13 @@ def prepare(session: Session) -> dict[str, PreparedStatement]:
             "latency_sum_ms = latency_sum_ms + ?, cache_hits = cache_hits + ? "
             "WHERE project_id = ? AND dim = ? AND day = ? AND hour = ?"
         ),
+        # Which models/keys were seen today. Rewriting the same row on every flush
+        # is free in Cassandra (an insert *is* an upsert) and it is what makes the
+        # rollup's dimensions discoverable — see dims_by_day in init.cql.
+        "dim": session.prepare(
+            "INSERT INTO dims_by_day (project_id, day, kind, value, provider) "
+            "VALUES (?, ?, ?, ?, ?)"
+        ),
     }
 
 
@@ -236,6 +243,9 @@ def flush(session, stmts, requests_coll, consumer, buffer: list[dict], reason: s
     # 1. Raw rows: fire all inserts async, then wait for them together.
     futures = []
     rollup: dict[tuple, dict] = defaultdict(_empty_bucket)
+    # (project, day, kind, value) -> provider. Collapsed across the whole buffer,
+    # so a batch of 500 events costs a handful of writes, not 500.
+    dims: dict[tuple, str | None] = {}
     mongo_ops = []
     for e in buffer:
         futures.append(session.execute_async(stmts["by_model"], (
@@ -259,6 +269,11 @@ def flush(session, stmts, requests_coll, consumer, buffer: list[dict], reason: s
             b["latency_sum_ms"] += e["latency_ms"]
             b["cache_hits"] += 1 if e["cache_hit"] else 0
 
+        # 3. And note that those axes exist, so the dashboard can find them again
+        #    without scanning anything (see dims_by_day in init.cql).
+        dims[(e["project_id"], e["day"], "model", e["model"])] = e["provider"]
+        dims[(e["project_id"], e["day"], "key", e["api_key_id"])] = None
+
         # $set, not a replace: the gateway owns the prompt/response fields of this
         # same document and may have written them a moment ago (or be about to).
         mongo_ops.append(
@@ -268,7 +283,7 @@ def flush(session, stmts, requests_coll, consumer, buffer: list[dict], reason: s
     for f in futures:
         f.result()
 
-    # 3. One counter UPDATE per bucket — this is where batching pays off.
+    # 4. One counter UPDATE per bucket — this is where batching pays off.
     rollup_futures = [
         session.execute_async(stmts["rollup"], (
             b["cost_micros"], b["requests"], b["errors"], b["prompt_tokens"],
@@ -277,14 +292,18 @@ def flush(session, stmts, requests_coll, consumer, buffer: list[dict], reason: s
         ))
         for (project_id, dim, day, hour), b in rollup.items()
     ]
-    for f in rollup_futures:
+    dim_futures = [
+        session.execute_async(stmts["dim"], (project_id, day, kind, value, provider))
+        for (project_id, day, kind, value), provider in dims.items()
+    ]
+    for f in rollup_futures + dim_futures:
         f.result()
 
-    # 4. Mongo request documents.
+    # 5. Mongo request documents.
     if mongo_ops:
         requests_coll.bulk_write(mongo_ops, ordered=False)
 
-    # 5. Only now is it safe to advance the committed offset.
+    # 6. Only now is it safe to advance the committed offset.
     consumer.commit(asynchronous=False)
 
     print(
