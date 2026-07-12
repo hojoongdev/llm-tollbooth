@@ -121,6 +121,48 @@ services:
       - "${MAILPIT_UI_PORT:-8025}:8025" # web UI
       - "${MAILPIT_SMTP_PORT:-1025}:1025" # SMTP endpoint the workers send to
 
+  # The tollbooth itself (P3): an OpenAI-compatible proxy. Authenticates the API
+  # key, calls a provider (the built-in mock unless a real key is configured),
+  # returns the answer, and publishes one llm.events record per call — without
+  # ever making the caller wait for that record to land.
+  #
+  # It needs Mongo (keys, pricing) to serve at all, and Kafka only to *report*;
+  # with the broker down it keeps answering and drops the events.
+  gateway:
+    build: ./gateway
+    image: llm-tollbooth/gateway
+    container_name: llm-tollbooth-gateway
+    ports:
+      - "${GATEWAY_PORT:-8080}:8080"
+    depends_on:
+      kafka:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+    environment:
+      PORT: 8080
+      KAFKA_BOOTSTRAP: kafka:29092
+      KAFKA_TOPIC: llm.events
+      MONGO_URI: mongodb://mongodb:27017
+      MONGO_DB: tollbooth
+      PROJECT_ID: default
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # AUTH_MODE=none => the gateway mints its own API key at boot and prints it.
+      # GATEWAY_DEFAULT_KEY pins that key so it survives a restart.
+      AUTH_MODE: ${AUTH_MODE:-none}
+      GATEWAY_DEFAULT_KEY: ${GATEWAY_DEFAULT_KEY:-}
+      # Mock provider: the fake LLM that makes the stack demo-able with no real
+      # API key. Set MOCK_LATENCY_MS=0 to measure the gateway's own overhead.
+      MOCK_LATENCY_MS: ${MOCK_LATENCY_MS:-250}
+      MOCK_ERROR_RATE: ${MOCK_ERROR_RATE:-0}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
   # Ingest worker: consumes llm.events and persists it off the hot path — raw
   # rows + hourly rollups to Cassandra, request documents to MongoDB (P2).
   # Waits for the schema (cassandra-init) before it starts writing.
