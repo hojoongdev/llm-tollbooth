@@ -27,6 +27,47 @@ function num(v: unknown): number {
   return typeof maybe.toNumber === "function" ? maybe.toNumber() : Number(v);
 }
 
+/**
+ * Upper bounds of the rollup's latency histogram, in ms — the same ladder as the
+ * lat_le_* counter columns, in the same order. This mirrors LATENCY_BUCKETS_MS in
+ * the ingest worker; both are shadows of init.cql, where the ladder really lives.
+ */
+const LATENCY_BOUNDS_MS = [10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000];
+const LATENCY_COLUMNS = LATENCY_BOUNDS_MS.map((b) => `lat_le_${b}`);
+
+/**
+ * Interpolate a percentile out of the cumulative `le` histogram.
+ *
+ * `hist[i]` counts the requests at or below LATENCY_BOUNDS_MS[i]. `total` is the
+ * histogram's own denominator, `lat_count` — *not* `requests`, which counts rows
+ * the histogram never saw (see init.cql). Find the bucket the target rank lands
+ * in and assume its requests are spread evenly across it: the standard histogram
+ * approximation, and the reason a bucket's width is the error bound on any
+ * percentile inside it.
+ *
+ * Past the last bound there is nothing to interpolate against — an unbounded
+ * bucket has no top. Returning the last bound is the honest floor ("at least this
+ * slow"), and the ladder runs to 10s so that stays rare.
+ */
+function percentile(hist: number[], total: number, p: number): number {
+  if (total <= 0) return 0;
+  const rank = p * total;
+
+  let lowerBound = 0;
+  let lowerCount = 0;
+  for (let i = 0; i < LATENCY_BOUNDS_MS.length; i++) {
+    const count = hist[i];
+    if (count >= rank) {
+      const inBucket = count - lowerCount;
+      if (inBucket <= 0) return lowerBound;
+      return lowerBound + ((rank - lowerCount) / inBucket) * (LATENCY_BOUNDS_MS[i] - lowerBound);
+    }
+    lowerBound = LATENCY_BOUNDS_MS[i];
+    lowerCount = count;
+  }
+  return LATENCY_BOUNDS_MS[LATENCY_BOUNDS_MS.length - 1];
+}
+
 export interface Totals {
   cost: number;
   requests: number;
@@ -36,6 +77,9 @@ export interface Totals {
   completionTokens: number;
   totalTokens: number;
   avgLatency: number;
+  p50: number;
+  p95: number;
+  p99: number;
   cacheHits: number;
   cacheHitRate: number;
 }
@@ -61,11 +105,21 @@ interface Bucket {
   completionTokens: number;
   latencySum: number;
   cacheHits: number;
+  // Cumulative `le` counts, one per LATENCY_BOUNDS_MS entry. Summing them across
+  // the window's hourly rows is plain column-wise addition, exactly like every
+  // other counter here — which is the property cumulative buckets were chosen for.
+  latencyHist: number[];
+  // How many requests the histogram actually counted. Equal to `requests` for any
+  // hour written since the buckets landed, and zero for the hours written before —
+  // which is exactly why the percentiles divide by this and not by `requests`.
+  latencyCount: number;
 }
 
 const empty = (): Bucket => ({
   costMicros: 0, requests: 0, errors: 0, promptTokens: 0,
   completionTokens: 0, latencySum: 0, cacheHits: 0,
+  latencyHist: LATENCY_BOUNDS_MS.map(() => 0),
+  latencyCount: 0,
 });
 
 function add(b: Bucket, row: Record<string, unknown>): void {
@@ -76,6 +130,10 @@ function add(b: Bucket, row: Record<string, unknown>): void {
   b.completionTokens += num(row.completion_tokens);
   b.latencySum += num(row.latency_sum_ms);
   b.cacheHits += num(row.cache_hits);
+  b.latencyCount += num(row.lat_count);
+  for (let i = 0; i < LATENCY_COLUMNS.length; i++) {
+    b.latencyHist[i] += num(row[LATENCY_COLUMNS[i]]);
+  }
 }
 
 /** The rollup rows for one breakdown axis over a window — the shared read. */
@@ -85,7 +143,8 @@ async function rollupRows(w: Window, dim: string) {
   const params = [PROJECT, dim, ...days.map((d) => types.LocalDate.fromString(d))];
   const cql =
     "SELECT day, hour, cost_micros, requests, errors, prompt_tokens, " +
-    "completion_tokens, latency_sum_ms, cache_hits FROM rollup_hourly " +
+    `completion_tokens, latency_sum_ms, cache_hits, lat_count, ${LATENCY_COLUMNS.join(", ")} ` +
+    "FROM rollup_hourly " +
     `WHERE project_id = ? AND dim = ? AND day IN (${placeholders})`;
 
   const res = await client().execute(cql, params, { prepare: true });
@@ -154,6 +213,9 @@ function summarize(b: Bucket): Totals {
     completionTokens: b.completionTokens,
     totalTokens: b.promptTokens + b.completionTokens,
     avgLatency: b.requests ? b.latencySum / b.requests : 0,
+    p50: percentile(b.latencyHist, b.latencyCount, 0.5),
+    p95: percentile(b.latencyHist, b.latencyCount, 0.95),
+    p99: percentile(b.latencyHist, b.latencyCount, 0.99),
     cacheHits: b.cacheHits,
     cacheHitRate: b.requests ? b.cacheHits / b.requests : 0,
   };

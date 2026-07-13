@@ -9,9 +9,17 @@ dependencies = [
     "pymongo==4.10.1",
 ]
 
+[project.optional-dependencies]
+dev = ["pytest==8.3.4"]
+
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 py-modules = ["main"]
+
+# The tests import `main` directly, so pytest has to be able to see it. It sits
+# at the package root rather than under a src/ layout, hence rootdir on the path.
+[tool.pytest.ini_options]
+pythonpath = ["."]

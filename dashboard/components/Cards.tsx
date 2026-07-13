@@ -32,7 +32,14 @@ export function Cards({ totals }: { totals: Totals }) {
         sub={`${count(totals.errors)} errors`}
         err={totals.errors > 0}
       />
-      <Stat label="Avg latency" value={ms(totals.avgLatency)} sub="mean over window" />
+      {/* p95, not the mean. The mean is the one latency number that reliably lies
+          about an LLM gateway: a cache hit answers in ~1ms and a slow completion
+          takes ten seconds, so averaging them describes no request anyone made. */}
+      <Stat
+        label="Latency p95"
+        value={ms(totals.p95)}
+        sub={`p50 ${ms(totals.p50)} · p99 ${ms(totals.p99)}`}
+      />
     </div>
   );
 }
