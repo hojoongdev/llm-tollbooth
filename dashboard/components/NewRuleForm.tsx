@@ -1,0 +1,158 @@
+"use client";
+
+import { useActionState, useState } from "react";
+import { BellRing } from "lucide-react";
+
+import { addRule, type NewRuleState } from "@/app/(app)/rules/actions";
+import { Card } from "@/components/ui/card";
+import { BUTTON } from "@/components/ui/controls";
+import { Field, SelectField } from "@/components/ui/field";
+import { METRIC_LABEL, METRIC_UNIT, METRICS, type Metric } from "@/lib/rule-format";
+
+export interface ScopeOption {
+  value: string;
+  label: string;
+}
+
+export function NewRuleForm({ keys, models }: { keys: ScopeOption[]; models: string[] }) {
+  const [state, action, pending] = useActionState<NewRuleState, FormData>(addRule, {});
+  // The only client state on this form, and it earns its keep: "over 5" means five
+  // dollars, five milliseconds or five requests depending on the metric beside it, so
+  // the threshold has to say which one it is currently asking for.
+  const [metric, setMetric] = useState<Metric>("cost");
+
+  return (
+    <Card className="p-4">
+      <form action={action} className="flex flex-col gap-4">
+        <div className="flex flex-wrap items-end gap-3">
+          <Field label="Name" name="name" placeholder="Hourly spend spike" required className="min-w-48 flex-1" />
+
+          {/* The scope select offers exactly the dims the rollup has, because a rule's
+              scope *is* a rollup dim — one that has never seen traffic has no row to
+              read and would be a rule that can never fire. */}
+          <SelectField label="Scope" name="scope" defaultValue="all" className="min-w-44">
+            <option value="all">All traffic</option>
+            {models.length > 0 ? (
+              <optgroup label="Model">
+                {models.map((m) => (
+                  <option key={m} value={`model:${m}`}>
+                    {m}
+                  </option>
+                ))}
+              </optgroup>
+            ) : null}
+            {keys.length > 0 ? (
+              <optgroup label="API key">
+                {keys.map((k) => (
+                  <option key={k.value} value={k.value}>
+                    {k.label}
+                  </option>
+                ))}
+              </optgroup>
+            ) : null}
+          </SelectField>
+
+          <SelectField
+            label="Metric"
+            name="metric"
+            value={metric}
+            onChange={(e) => setMetric(e.target.value as Metric)}
+            className="w-36"
+          >
+            {METRICS.map((m) => (
+              <option key={m} value={m}>
+                {METRIC_LABEL[m]}
+              </option>
+            ))}
+          </SelectField>
+
+          <SelectField label="Window" name="window_hours" defaultValue="1" className="w-28">
+            <option value="1">Last 1h</option>
+            <option value="24">Last 24h</option>
+          </SelectField>
+
+          <Field
+            label={`Over (${METRIC_UNIT[metric]})`}
+            name="threshold"
+            type="number"
+            step="any"
+            min="0"
+            required
+            placeholder={metric === "error_rate" ? "0.05" : "5"}
+            className="w-32"
+          />
+
+          <Field
+            label="Cooldown (min)"
+            name="cooldown_minutes"
+            type="number"
+            step="1"
+            min="0"
+            defaultValue={30}
+            className="w-32"
+          />
+        </div>
+
+        <fieldset className="flex flex-col gap-2 border-t border-border pt-3">
+          <legend className="sr-only">Actions</legend>
+          <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+            Then
+          </span>
+
+          <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
+            <Check name="use_email" label="Email">
+              <input name="email_to" type="email" placeholder="ops@example.com" className={FIELD} />
+            </Check>
+
+            <Check name="use_webhook" label="Webhook">
+              <input name="webhook_url" type="url" placeholder="https://hooks.slack.com/…" className={`${FIELD} w-56`} />
+            </Check>
+
+            <Check name="use_block" label="Block the key" />
+
+            <Check name="use_tag" label="Tag the requests">
+              <input name="tag_value" type="text" placeholder="cost-spike" className={`${FIELD} w-32`} />
+            </Check>
+          </div>
+        </fieldset>
+
+        <div className="flex items-center gap-3">
+          <button type="submit" disabled={pending} className={BUTTON}>
+            <BellRing className="h-3.5 w-3.5" strokeWidth={2} />
+            {pending ? "Arming…" : "Add rule"}
+          </button>
+          {state.error ? <p className="text-xs text-destructive">{state.error}</p> : null}
+          {state.ok ? <p className="text-xs text-success">{state.ok}</p> : null}
+        </div>
+      </form>
+
+      <p className="mt-3 text-[11px] text-muted-foreground">
+        규칙은 이벤트 하나가 아니라 <strong className="font-medium">시간 창</strong>을 봅니다 — 롤업이 시간 단위라
+        &ldquo;최근 1시간&rdquo;은 직전 시간대까지 걸칩니다. 차단(block)은 키 범위 규칙에서만 동작합니다.
+      </p>
+    </Card>
+  );
+}
+
+const FIELD =
+  "h-7 rounded-md border border-border bg-background px-2 text-xs outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring";
+
+function Check({
+  name,
+  label,
+  children,
+}: {
+  name: string;
+  label: string;
+  children?: React.ReactNode;
+}) {
+  return (
+    <div className="flex items-center gap-2">
+      <label className="flex items-center gap-1.5 text-xs font-medium">
+        <input type="checkbox" name={name} className="h-3.5 w-3.5 accent-primary" />
+        {label}
+      </label>
+      {children}
+    </div>
+  );
+}

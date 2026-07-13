@@ -251,6 +251,15 @@ async function modelsSeen(w: Window): Promise<Map<string, string | null>> {
 }
 
 /**
+ * The model names that saw traffic — the dim discovery on its own, without the
+ * per-model rollup reads the breakdown goes on to do. The Rules screen needs it to
+ * offer the scopes that actually exist, and nothing else about them.
+ */
+export async function modelsInWindow(w: Window): Promise<string[]> {
+  return [...(await modelsSeen(w)).keys()].sort();
+}
+
+/**
  * Per-model breakdown over the window, most expensive first.
  *
  * Reads the rollup once per model that saw traffic — so its cost tracks the
