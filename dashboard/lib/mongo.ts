@@ -6,58 +6,17 @@ import type { Window } from "./time";
 
 const g = globalThis as unknown as { __mongo?: MongoClient };
 
-function db(): Db {
+export function db(): Db {
   if (!g.__mongo) {
     g.__mongo = new MongoClient(process.env.MONGO_URI || "mongodb://localhost:27017");
   }
   return g.__mongo.db(process.env.MONGO_DB || "tollbooth");
 }
 
-// Anything not success/cached counts as an error (matches the ingest worker).
-const OK = ["success", "cached"];
-const isErrorExpr = { $cond: [{ $in: ["$status", OK] }, 0, 1] };
-
-export interface ModelRow {
-  model: string;
-  provider: string | null;
-  requests: number;
-  errors: number;
-  cost: number;
-  tokens: number;
-  avgLatency: number;
-}
-
-/** Per-model breakdown over the window, most expensive first. */
-export async function modelBreakdown(w: Window): Promise<ModelRow[]> {
-  const rows = await db()
-    .collection("requests")
-    .aggregate([
-      { $match: { project_id: PROJECT, ts: { $gte: w.start, $lte: w.end } } },
-      {
-        $group: {
-          _id: "$model",
-          provider: { $first: "$provider" },
-          requests: { $sum: 1 },
-          errors: { $sum: isErrorExpr },
-          cost: { $sum: "$cost_usd" },
-          tokens: { $sum: "$total_tokens" },
-          latency: { $sum: "$latency_ms" },
-        },
-      },
-      { $sort: { cost: -1 } },
-    ])
-    .toArray();
-
-  return rows.map((r) => ({
-    model: r._id ?? "unknown",
-    provider: r.provider ?? null,
-    requests: r.requests,
-    errors: r.errors,
-    cost: r.cost ?? 0,
-    tokens: r.tokens ?? 0,
-    avgLatency: r.requests ? r.latency / r.requests : 0,
-  }));
-}
+// Mongo answers the questions that need a *document* — the request log and its
+// detail. Anything that aggregates over many requests reads the Cassandra
+// rollups instead (see lib/cassandra.ts): the whole point of writing those
+// counters is never having to scan these documents to count something.
 
 export interface RequestRow {
   id: string;
@@ -125,7 +84,29 @@ export async function listRequests(f: RequestFilter): Promise<RequestRow[]> {
   return docs.map(toRow);
 }
 
-export async function getRequest(id: string): Promise<RequestRow | null> {
+export interface RequestDetail extends RequestRow {
+  /** The prompt, as sent. Null for synthetic loadgen events, which carry no bodies. */
+  messages: Array<{ role: string; content: string }> | null;
+  answer: string | null;
+  error: string | null;
+}
+
+/**
+ * One request, metrics *and* bodies.
+ *
+ * Two writers fill this document: the gateway stores the prompt/response the
+ * moment the call ends, the ingest worker merges the metrics in when it flushes
+ * its batch. Either can be the one that hasn't landed yet, so every field here
+ * is treated as optional.
+ */
+export async function getRequest(id: string): Promise<RequestDetail | null> {
   const doc = await db().collection("requests").findOne({ _id: id as never });
-  return doc ? toRow(doc) : null;
+  if (!doc) return null;
+
+  return {
+    ...toRow(doc),
+    messages: doc.request?.messages ?? null,
+    answer: doc.response?.content ?? null,
+    error: doc.error ?? null,
+  };
 }

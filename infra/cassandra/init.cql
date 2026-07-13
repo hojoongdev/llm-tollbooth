@@ -66,3 +66,24 @@ CREATE TABLE IF NOT EXISTS rollup_hourly (
   cache_hits counter,
   PRIMARY KEY ((project_id, dim, day), hour)
 );
+
+-- Which breakdown axes actually saw traffic, per day.
+--
+-- rollup_hourly is partitioned by (project, dim, day). That makes reading *one*
+-- dimension cheap, but leaves no way to discover which dimensions exist without
+-- scanning the table — so the ingest worker writes them down here as it goes.
+-- One small partition per (project, day), listing the models and keys seen.
+--
+-- This is the table that lets the dashboard's per-model breakdown be a handful
+-- of rollup partition reads instead of an aggregation over every raw request
+-- document. Without it the breakdown was O(traffic): fine at a few hundred rows,
+-- and 1.8 seconds once a load test pushed 1.5M of them in — the one read path
+-- that was still violating "wide queries never touch the raw tables".
+CREATE TABLE IF NOT EXISTS dims_by_day (
+  project_id text,
+  day date,
+  kind text,      -- 'model' | 'key'
+  value text,     -- the model name, or the api key id
+  provider text,  -- kind='model': who last served it. A label for the UI, not a key.
+  PRIMARY KEY ((project_id, day), kind, value)
+);

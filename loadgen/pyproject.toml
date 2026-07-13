@@ -5,6 +5,9 @@ description = "Synthetic LLM event/traffic generator for LLM Tollbooth"
 requires-python = ">=3.12"
 dependencies = [
     "confluent-kafka==2.6.1",
+    # Mode 2 drives the gateway over HTTP. Async, because a call takes ~250 ms and
+    # a sequential loop would cap the generator at 4 rps.
+    "httpx==0.28.1",
 ]
 
 [project.scripts]

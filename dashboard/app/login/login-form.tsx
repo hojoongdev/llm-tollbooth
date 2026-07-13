@@ -2,10 +2,8 @@
 
 import { useActionState } from "react";
 
+import { BUTTON, INPUT } from "@/components/ui/controls";
 import { login, type LoginState } from "./actions";
-
-const INPUT =
-  "h-8 rounded-md border border-border bg-background px-2.5 text-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background";
 
 export function LoginForm() {
   const [state, action, pending] = useActionState<LoginState, FormData>(login, {});
@@ -20,11 +18,7 @@ export function LoginForm() {
         <input name="password" type="password" autoComplete="current-password" required className={INPUT} />
       </label>
       {state.error ? <p className="text-xs text-destructive">{state.error}</p> : null}
-      <button
-        type="submit"
-        disabled={pending}
-        className="mt-1 inline-flex h-8 items-center justify-center rounded-md bg-primary px-3 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
-      >
+      <button type="submit" disabled={pending} className={`mt-1 ${BUTTON}`}>
         {pending ? "Signing in…" : "Sign in"}
       </button>
     </form>

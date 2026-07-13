@@ -28,7 +28,9 @@ _FEATURE_TAGS = ["checkout-bot", "support-agent", "summarizer", "search-rerank"]
 _ERROR_TYPES = ["upstream_timeout", "rate_limited", "provider_error"]
 
 
-def _pick_model() -> tuple[str, str, float, float]:
+def pick_model() -> tuple[str, str, float, float]:
+    """Draw a model from the weighted catalogue — shared with gateway mode, so
+    both modes produce the same traffic mix."""
     weights = [m[4] for m in _MODELS]
     provider, model, in_price, out_price, _ = random.choices(_MODELS, weights=weights)[0]
     return provider, model, in_price, out_price
@@ -41,7 +43,7 @@ def make_event(
 ) -> dict:
     """Build one synthetic event. `error_rate` is the probability (0..1) that
     this event represents a failed call."""
-    provider, model, in_price, out_price = _pick_model()
+    provider, model, in_price, out_price = pick_model()
 
     is_error = random.random() < error_rate
 

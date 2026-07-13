@@ -1,7 +1,7 @@
 "use client";
 
 import { usePathname } from "next/navigation";
-import { LayoutDashboard, LogOut, ScrollText, TrafficCone, type LucideIcon } from "lucide-react";
+import { CircleDollarSign, KeyRound, LayoutDashboard, LogOut, ScrollText, TrafficCone, type LucideIcon } from "lucide-react";
 
 import { logout } from "@/app/login/actions";
 import { PROJECT } from "@/lib/config";
@@ -22,10 +22,28 @@ function SignOutButton() {
   );
 }
 
-const NAV: { href: string; label: string; icon: LucideIcon }[] = [
-  { href: "/", label: "Overview", icon: LayoutDashboard },
-  { href: "/requests", label: "Requests", icon: ScrollText },
+type NavItem = { href: string; label: string; icon: LucideIcon };
+
+// Grouped by what you came here to do: watch what happened, or change what the
+// gateway will do next.
+const NAV: { section: string; items: NavItem[] }[] = [
+  {
+    section: "Observability",
+    items: [
+      { href: "/", label: "Overview", icon: LayoutDashboard },
+      { href: "/requests", label: "Requests", icon: ScrollText },
+    ],
+  },
+  {
+    section: "Gateway",
+    items: [
+      { href: "/keys", label: "API Keys", icon: KeyRound },
+      { href: "/pricing", label: "Pricing", icon: CircleDollarSign },
+    ],
+  },
 ];
+
+const ALL_ITEMS = NAV.flatMap((group) => group.items);
 
 function matches(href: string, current: string) {
   return href === "/" ? current === "/" : current.startsWith(href);
@@ -83,11 +101,15 @@ export function AppSidebar({ authEnabled }: { authEnabled?: boolean }) {
         <Brand />
       </div>
       <nav className="flex flex-1 flex-col gap-0.5 p-2">
-        <div className="px-2 pb-1.5 pt-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-          Observability
-        </div>
-        {NAV.map((item) => (
-          <NavLink key={item.href} {...item} active={matches(item.href, active)} />
+        {NAV.map((group) => (
+          <div key={group.section} className="flex flex-col gap-0.5">
+            <div className="px-2 pb-1.5 pt-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+              {group.section}
+            </div>
+            {group.items.map((item) => (
+              <NavLink key={item.href} {...item} active={matches(item.href, active)} />
+            ))}
+          </div>
         ))}
       </nav>
       <div className="mt-auto flex flex-col gap-2 border-t border-border p-3">
@@ -111,7 +133,7 @@ export function MobileBar({ authEnabled }: { authEnabled?: boolean }) {
     <header className="sticky top-0 z-30 flex h-12 items-center gap-3 border-b border-border bg-card px-4 md:hidden">
       <Brand />
       <nav className="ml-auto flex items-center gap-1">
-        {NAV.map((item) => (
+        {ALL_ITEMS.map((item) => (
           <NavLink key={item.href} {...item} active={matches(item.href, active)} />
         ))}
         <ThemeToggle />
