@@ -260,6 +260,35 @@ export async function modelsInWindow(w: Window): Promise<string[]> {
 }
 
 /**
+ * What one key has spent on each of these UTC days, in dollars.
+ *
+ * A deliberate mirror of the gateway's own spendMicrosByDay (gateway/src/cassandra.ts):
+ * same table, same dim, same partitions. The budget gauge has to show the number the
+ * gateway is actually enforcing against — a gauge reading 40% while the gateway refuses
+ * the call would be worse than no gauge, because someone would believe it.
+ *
+ * One query however many days: the rollup's partition key is (project, dim, day), so a
+ * month is a handful of partitions read by name and never a scan.
+ */
+export async function keySpendByDay(keyId: string, days: string[]): Promise<Map<string, number>> {
+  const spend = new Map<string, number>();
+  if (days.length === 0) return spend;
+
+  const placeholders = days.map(() => "?").join(",");
+  const cql =
+    "SELECT day, cost_micros FROM rollup_hourly " +
+    `WHERE project_id = ? AND dim = ? AND day IN (${placeholders})`;
+  const params = [PROJECT, `key:${keyId}`, ...days.map((d) => types.LocalDate.fromString(d))];
+
+  const res = await client().execute(cql, params, { prepare: true });
+  for (const row of res.rows) {
+    const day = String(row.day);
+    spend.set(day, (spend.get(day) ?? 0) + num(row.cost_micros) / 1_000_000);
+  }
+  return spend;
+}
+
+/**
  * Per-model breakdown over the window, most expensive first.
  *
  * Reads the rollup once per model that saw traffic — so its cost tracks the
