@@ -256,6 +256,10 @@ services:
       MONGO_DB: tollbooth
       PROJECT_ID: default
       RULES_EVAL_SECONDS: ${RULES_EVAL_SECONDS:-20}
+      # Keyword rules read the request document, so they cost a Mongo read per call. This
+      # bounds that — but it defaults to reading everything, because a rule that samples a
+      # leak misses it most of the time while looking armed.
+      RULES_KEYWORD_SAMPLE_RATE: ${RULES_KEYWORD_SAMPLE_RATE:-1.0}
       # Point at the bundled Mailpit by default, so email alerts work out of the box
       # with no account, no credentials and nothing that could reach a real inbox.
       # Override these for a real relay; SMTP_USER is what turns on STARTTLS.

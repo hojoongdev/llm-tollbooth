@@ -9,6 +9,16 @@
 
 import { count, ms, pct, usd } from "./format";
 
+/** Three conditions, and they are not the same shape (spec §4 group C). */
+export const CONDITIONS = ["metric_threshold", "budget_percent", "keyword_match"] as const;
+export type ConditionKind = (typeof CONDITIONS)[number];
+
+export const CONDITION_LABEL: Record<ConditionKind, string> = {
+  metric_threshold: "Metric over a threshold",
+  budget_percent: "Budget % reached",
+  keyword_match: "Keyword in a call",
+};
+
 export const METRICS = ["cost", "tokens", "latency_p95", "error_rate", "request_count"] as const;
 export type Metric = (typeof METRICS)[number];
 
@@ -29,6 +39,18 @@ export const METRIC_LABEL: Record<Metric, string> = {
   request_count: "Requests",
 };
 
+export const BUDGET_PERIODS = ["daily", "monthly"] as const;
+export type BudgetPeriod = (typeof BUDGET_PERIODS)[number];
+
+export const KEYWORD_TARGETS = ["either", "prompt", "response"] as const;
+export type KeywordTarget = (typeof KEYWORD_TARGETS)[number];
+
+export const KEYWORD_TARGET_LABEL: Record<KeywordTarget, string> = {
+  either: "Prompt or response",
+  prompt: "Prompt only",
+  response: "Response only",
+};
+
 export const ACTION_TYPES = ["email", "webhook", "block", "tag"] as const;
 export type ActionType = (typeof ACTION_TYPES)[number];
 
@@ -44,13 +66,21 @@ export interface RuleRow {
   name: string;
   enabled: boolean;
   scope: string;
-  metric: Metric;
-  windowHours: number;
-  threshold: number;
+  kind: ConditionKind;
   cooldownSeconds: number;
   actions: RuleAction[];
   lastFiredAt: Date | null;
   createdAt: Date;
+  // metric_threshold
+  metric: Metric;
+  windowHours: number;
+  threshold: number;
+  // budget_percent
+  period: BudgetPeriod;
+  percent: number;
+  // keyword_match
+  keyword: string;
+  matchedIn: KeywordTarget;
 }
 
 export interface FiredAction {
@@ -65,10 +95,18 @@ export interface FiringRow {
   ruleName: string;
   firedAt: Date;
   scope: string;
-  metric: string;
-  windowHours: number;
-  threshold: number;
-  observed: number;
+  kind: ConditionKind;
+  /**
+   * The sentence the worker wrote at the moment it fired.
+   *
+   * Not re-derived here, on purpose. Three condition types describe themselves with three
+   * different sets of fields, and reassembling that in TypeScript would mean two
+   * implementations of the same sentence — which would eventually disagree, and the console
+   * would be the one that was wrong. The email, the webhook and this table all repeat what
+   * the worker said.
+   */
+  detail: string;
+  requestId: string | null;
   actions: FiredAction[];
 }
 
@@ -96,4 +134,26 @@ export function scopeLabel(scope: string): string {
   if (scope === "all") return "all traffic";
   const colon = scope.indexOf(":");
   return colon === -1 ? scope : scope.slice(colon + 1);
+}
+
+const METRIC_PHRASE: Record<Metric, string> = {
+  cost: "cost",
+  tokens: "tokens",
+  latency_p95: "latency p95",
+  error_rate: "error rate",
+  request_count: "requests",
+};
+
+/** What this rule is watching for, in one line, in whatever terms its condition uses. */
+export function ruleSummary(r: RuleRow): string {
+  switch (r.kind) {
+    case "budget_percent":
+      return `${r.period} budget reaches ${r.percent}%`;
+    case "keyword_match":
+      return r.matchedIn === "either"
+        ? `“${r.keyword}” in the prompt or the response`
+        : `“${r.keyword}” in the ${r.matchedIn}`;
+    default:
+      return `${METRIC_PHRASE[r.metric]} over ${metricValue(r.metric, r.threshold)} in the last ${r.windowHours}h`;
+  }
 }

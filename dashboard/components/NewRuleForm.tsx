@@ -7,7 +7,18 @@ import { addRule, type NewRuleState } from "@/app/(app)/rules/actions";
 import { Card } from "@/components/ui/card";
 import { BUTTON } from "@/components/ui/controls";
 import { Field, SelectField } from "@/components/ui/field";
-import { METRIC_LABEL, METRIC_UNIT, METRICS, type Metric } from "@/lib/rule-format";
+import {
+  BUDGET_PERIODS,
+  CONDITION_LABEL,
+  CONDITIONS,
+  KEYWORD_TARGET_LABEL,
+  KEYWORD_TARGETS,
+  METRIC_LABEL,
+  METRIC_UNIT,
+  METRICS,
+  type ConditionKind,
+  type Metric,
+} from "@/lib/rule-format";
 
 export interface ScopeOption {
   value: string;
@@ -16,21 +27,37 @@ export interface ScopeOption {
 
 export function NewRuleForm({ keys, models }: { keys: ScopeOption[]; models: string[] }) {
   const [state, action, pending] = useActionState<NewRuleState, FormData>(addRule, {});
-  // The only client state on this form, and it earns its keep: "over 5" means five
-  // dollars, five milliseconds or five requests depending on the metric beside it, so
-  // the threshold has to say which one it is currently asking for.
+
+  // Two pieces of client state, and both earn it. The condition kind decides *which fields
+  // exist* — a budget rule has no window and a keyword rule has no threshold — and the
+  // metric decides what "over 5" is five *of*.
+  const [kind, setKind] = useState<ConditionKind>("metric_threshold");
   const [metric, setMetric] = useState<Metric>("cost");
 
   return (
     <Card className="p-4">
       <form action={action} className="flex flex-col gap-4">
         <div className="flex flex-wrap items-end gap-3">
-          <Field label="Name" name="name" placeholder="Hourly spend spike" required className="min-w-48 flex-1" />
+          <Field label="Name" name="name" placeholder="Hourly spend spike" required className="min-w-44 flex-1" />
 
-          {/* The scope select offers exactly the dims the rollup has, because a rule's
-              scope *is* a rollup dim — one that has never seen traffic has no row to
-              read and would be a rule that can never fire. */}
-          <SelectField label="Scope" name="scope" defaultValue="all" className="min-w-44">
+          <SelectField
+            label="When"
+            name="kind"
+            value={kind}
+            onChange={(e) => setKind(e.target.value as ConditionKind)}
+            className="w-48"
+          >
+            {CONDITIONS.map((c) => (
+              <option key={c} value={c}>
+                {CONDITION_LABEL[c]}
+              </option>
+            ))}
+          </SelectField>
+
+          {/* The scope select offers exactly the dims the rollup has, because a rule's scope
+              *is* a rollup dim — one that has never seen traffic has no row to read, and
+              would be a rule that can never fire. */}
+          <SelectField label="Scope" name="scope" defaultValue="all" className="min-w-40">
             <option value="all">All traffic</option>
             {models.length > 0 ? (
               <optgroup label="Model">
@@ -52,35 +79,83 @@ export function NewRuleForm({ keys, models }: { keys: ScopeOption[]; models: str
             ) : null}
           </SelectField>
 
-          <SelectField
-            label="Metric"
-            name="metric"
-            value={metric}
-            onChange={(e) => setMetric(e.target.value as Metric)}
-            className="w-36"
-          >
-            {METRICS.map((m) => (
-              <option key={m} value={m}>
-                {METRIC_LABEL[m]}
-              </option>
-            ))}
-          </SelectField>
+          {kind === "metric_threshold" ? (
+            <>
+              <SelectField
+                label="Metric"
+                name="metric"
+                value={metric}
+                onChange={(e) => setMetric(e.target.value as Metric)}
+                className="w-36"
+              >
+                {METRICS.map((m) => (
+                  <option key={m} value={m}>
+                    {METRIC_LABEL[m]}
+                  </option>
+                ))}
+              </SelectField>
 
-          <SelectField label="Window" name="window_hours" defaultValue="1" className="w-28">
-            <option value="1">Last 1h</option>
-            <option value="24">Last 24h</option>
-          </SelectField>
+              <SelectField label="Window" name="window_hours" defaultValue="1" className="w-28">
+                <option value="1">Last 1h</option>
+                <option value="24">Last 24h</option>
+              </SelectField>
 
-          <Field
-            label={`Over (${METRIC_UNIT[metric]})`}
-            name="threshold"
-            type="number"
-            step="any"
-            min="0"
-            required
-            placeholder={metric === "error_rate" ? "0.05" : "5"}
-            className="w-32"
-          />
+              <Field
+                label={`Over (${METRIC_UNIT[metric]})`}
+                name="threshold"
+                type="number"
+                step="any"
+                min="0"
+                required
+                placeholder={metric === "error_rate" ? "0.05" : "5"}
+                className="w-32"
+              />
+            </>
+          ) : null}
+
+          {kind === "budget_percent" ? (
+            <>
+              <SelectField label="Budget" name="period" defaultValue="daily" className="w-32">
+                {BUDGET_PERIODS.map((p) => (
+                  <option key={p} value={p}>
+                    {p[0].toUpperCase() + p.slice(1)}
+                  </option>
+                ))}
+              </SelectField>
+
+              <Field
+                label="Reaches (%)"
+                name="percent"
+                type="number"
+                step="1"
+                min="1"
+                required
+                defaultValue={80}
+                className="w-32"
+              />
+            </>
+          ) : null}
+
+          {kind === "keyword_match" ? (
+            <>
+              <Field
+                label="Keyword"
+                name="keyword"
+                type="text"
+                required
+                placeholder="password"
+                className="w-44"
+              />
+
+              <SelectField label="Look in" name="matched_in" defaultValue="either" className="w-44">
+                {KEYWORD_TARGETS.map((t) => (
+                  <option key={t} value={t}>
+                    {KEYWORD_TARGET_LABEL[t]}
+                  </option>
+                ))}
+              </SelectField>
+            </>
+          ) : null}
 
           <Field
             label="Cooldown (min)"
@@ -126,11 +201,37 @@ export function NewRuleForm({ keys, models }: { keys: ScopeOption[]; models: str
         </div>
       </form>
 
-      <p className="mt-3 text-[11px] text-muted-foreground">
-        규칙은 이벤트 하나가 아니라 <strong className="font-medium">시간 창</strong>을 봅니다 — 롤업이 시간 단위라
-        &ldquo;최근 1시간&rdquo;은 직전 시간대까지 걸칩니다. 차단(block)은 키 범위 규칙에서만 동작합니다.
+      <p className="mt-3 text-[11px] leading-relaxed text-muted-foreground">
+        <Hint kind={kind} />
       </p>
     </Card>
+  );
+}
+
+function Hint({ kind }: { kind: ConditionKind }) {
+  if (kind === "budget_percent") {
+    return (
+      <>
+        예산은 시간 창이 아니라 <strong className="font-medium">달력</strong> 기준입니다 — &ldquo;오늘&rdquo;은 UTC 하루
+        전체이고, 게이트웨이가 실제로 차단할 때 보는 값과 같은 숫자를 읽습니다. 키 범위 규칙에서만 동작합니다.
+      </>
+    );
+  }
+  if (kind === "keyword_match") {
+    return (
+      <>
+        키워드는 롤업이 답할 수 없는 유일한 조건이라 <strong className="font-medium">요청 문서를 직접 열어봅니다</strong>{" "}
+        — 따라서 게이트웨이를 실제로 통과한 호출에만 걸립니다 (loadgen 합성 이벤트에는 본문이 없습니다). 대소문자는
+        구분하지 않습니다. 태그 액션은 창 전체가 아니라 <strong className="font-medium">걸린 그 요청 하나</strong>에만
+        붙습니다.
+      </>
+    );
+  }
+  return (
+    <>
+      규칙은 이벤트 하나가 아니라 <strong className="font-medium">시간 창</strong>을 봅니다 — 롤업이 시간 단위라
+      &ldquo;최근 1시간&rdquo;은 직전 시간대까지 걸칩니다. 차단(block)은 키 범위 규칙에서만 동작합니다.
+    </>
   );
 }
 

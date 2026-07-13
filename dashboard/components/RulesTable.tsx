@@ -4,18 +4,10 @@ import { BellRing, Pause, Play, RotateCcw, Save, Trash2 } from "lucide-react";
 
 import { rearmRule, removeRule, toggleRule, tuneRule } from "@/app/(app)/rules/actions";
 import { ago } from "@/lib/format";
-import { METRIC_UNIT, metricValue, scopeLabel, type RuleRow } from "@/lib/rule-format";
+import { METRIC_UNIT, ruleSummary, scopeLabel, type RuleRow } from "@/lib/rule-format";
 import { Badge } from "@/components/ui/badge";
 import { BUTTON_QUIET } from "@/components/ui/controls";
 import { Field } from "@/components/ui/field";
-
-const METRIC_PHRASE: Record<string, string> = {
-  cost: "cost",
-  tokens: "tokens",
-  latency_p95: "latency p95",
-  error_rate: "error rate",
-  request_count: "requests",
-};
 
 export function RulesTable({ rows, now }: { rows: RuleRow[]; now: number }) {
   if (rows.length === 0) {
@@ -29,11 +21,19 @@ export function RulesTable({ rows, now }: { rows: RuleRow[]; now: number }) {
   return (
     <ul className="divide-y divide-border">
       {rows.map((r) => {
-        // A rule inside its cooldown is armed but deliberately silent, and that is a
-        // third state worth showing: "enabled" alone would imply it is about to fire.
+        // A rule inside its cooldown is armed but deliberately silent, and that is a third
+        // state worth showing: "enabled" alone would imply it is about to fire.
         const cooling =
           r.lastFiredAt !== null &&
           now - new Date(r.lastFiredAt).getTime() < r.cooldownSeconds * 1000;
+
+        // A keyword rule has no number to tune. Its threshold is a word.
+        const tunable =
+          r.kind === "metric_threshold"
+            ? { label: `Over (${METRIC_UNIT[r.metric]})`, value: r.threshold, step: "any" }
+            : r.kind === "budget_percent"
+              ? { label: "Reaches (%)", value: r.percent, step: "1" }
+              : null;
 
         return (
           <li key={r.id} className="flex flex-col gap-3 px-4 py-3">
@@ -51,10 +51,7 @@ export function RulesTable({ rows, now }: { rows: RuleRow[]; now: number }) {
               <span className="text-xs text-muted-foreground">
                 <span className="font-mono">{scopeLabel(r.scope)}</span>
                 {" · "}
-                {METRIC_PHRASE[r.metric] ?? r.metric} over{" "}
-                <span className="font-mono tabular-nums">{metricValue(r.metric, r.threshold)}</span>
-                {" in the last "}
-                {r.windowHours}h
+                {ruleSummary(r)}
               </span>
 
               {r.actions.length > 0 ? (
@@ -117,19 +114,22 @@ export function RulesTable({ rows, now }: { rows: RuleRow[]; now: number }) {
               </div>
             </div>
 
-            {/* The two numbers anyone actually comes back to tune. Everything else about
-                a rule is what it *is*; change that and it's a different rule. */}
+            {/* What anyone actually comes back to tune. Everything else about a rule is what
+                it *is* — change that and it is a different rule. */}
             <form action={tuneRule} className="flex flex-wrap items-end gap-3">
               <input type="hidden" name="id" value={r.id} />
-              <Field
-                label={`Over (${METRIC_UNIT[r.metric]})`}
-                name="threshold"
-                type="number"
-                step="any"
-                min="0"
-                defaultValue={r.threshold}
-                className="w-32"
-              />
+              <input type="hidden" name="kind" value={r.kind} />
+              {tunable ? (
+                <Field
+                  label={tunable.label}
+                  name="value"
+                  type="number"
+                  step={tunable.step}
+                  min="0"
+                  defaultValue={tunable.value}
+                  className="w-32"
+                />
+              ) : null}
               <Field
                 label="Cooldown (min)"
                 name="cooldown_minutes"

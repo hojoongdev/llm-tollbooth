@@ -138,9 +138,17 @@ docker compose logs -f ingest
 
 ### Set an alert, and get one
 
-A rule is a **condition**, a **scope**, some **actions** and a **cooldown**. Open **Rules**
-and build one — say *cost over **$1.00** in the last **1h**, on **all traffic**, then
-**email** me* — then spend past it:
+A rule is a **condition**, a **scope**, some **actions** and a **cooldown**. There are three
+conditions, and they are not the same shape:
+
+| Condition | Asks | Answered by |
+|---|---|---|
+| **Metric over a threshold** | cost / tokens / latency p95 / error rate / requests, over a 1h or 24h window | the hourly rollup, on a timer |
+| **Budget % reached** | has this key reached 80% of its daily or monthly cap? | the same rollup, but over a *calendar* period — because that is what a budget is, and what the gateway enforces |
+| **Keyword in a call** | did the word "password" turn up in a prompt or an answer? | the request document itself — this one no rollup can answer, so it is the only condition evaluated per event |
+
+Open **Rules** and build one — say *cost over **$1.00** in the last **1h**, on **all
+traffic**, then **email** me* — then spend past it:
 
 ```bash
 docker compose run --rm loadgen --rps 45 --duration 12
@@ -169,6 +177,20 @@ The other three actions: **webhook** (one payload that Slack, Discord and a plai
 all read), **tag** (labels the requests that made up the breach, so the Requests screen can
 filter to exactly them), and **block** (flips the key off — and the gateway stops serving it
 on the very next call, not whenever its key cache happens to expire).
+
+A **keyword** rule is the one that reads the call itself. Watch for `swordfish` in the
+prompt, then leak it:
+
+```bash
+curl http://localhost:8080/v1/chat/completions \
+  -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"model":"gpt-4o","messages":[{"role":"user","content":"the old key was SWORDFISH"}]}'
+```
+
+The alert names the request, and a **tag** action on a keyword rule labels *that one call* —
+not the hour around it, which would bury the very thing you need to read. (It matches
+case-insensitively, and it only sees traffic that actually went through the gateway:
+synthetic loadgen events have no body to search.)
 
 > The rules worker reads the **same `llm.events` topic as the ingest worker, from its own
 > consumer group.** It reads the stream to learn which scopes saw traffic, then asks the

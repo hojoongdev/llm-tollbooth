@@ -1,14 +1,21 @@
+import Link from "next/link";
+
 import { fmtTs } from "@/lib/format";
-import { metricValue, scopeLabel, type FiringRow } from "@/lib/rule-format";
+import { scopeLabel, type FiringRow } from "@/lib/rule-format";
 import { Badge } from "@/components/ui/badge";
 
 /**
- * What fired, when, on what, and whether anyone was actually told.
+ * What fired, when, on what — and whether anyone was actually told.
  *
- * That last column is the one that earns its place. An action can fail — an SMTP relay
- * down, a webhook 500ing — and the worker deliberately does not retry, because retrying
- * a broken webhook every twenty seconds would defeat the cooldown. So the failure has
- * to be visible somewhere, and this is somewhere.
+ * That last column earns its place. An action can fail (an SMTP relay down, a webhook
+ * 500ing) and the worker deliberately does not retry it, because retrying a broken webhook
+ * every twenty seconds would defeat the cooldown. So the failure has to be visible
+ * somewhere, and this is somewhere.
+ *
+ * The "what tripped it" column prints the sentence the *worker* wrote when it fired, rather
+ * than reassembling one here. Three condition types describe themselves with three different
+ * sets of fields, and a second implementation of that sentence would eventually disagree with
+ * the first — and the console would be the one that was wrong.
  */
 export function FiringHistory({ rows }: { rows: FiringRow[] }) {
   if (rows.length === 0) {
@@ -27,8 +34,7 @@ export function FiringHistory({ rows }: { rows: FiringRow[] }) {
             <th className="px-3 py-2 font-medium">Fired (UTC)</th>
             <th className="px-3 py-2 font-medium">Rule</th>
             <th className="px-3 py-2 font-medium">Scope</th>
-            <th className="px-3 py-2 text-right font-medium">Observed</th>
-            <th className="px-3 py-2 text-right font-medium">Threshold</th>
+            <th className="px-3 py-2 font-medium">What tripped it</th>
             <th className="px-3 py-2 font-medium">Actions</th>
           </tr>
         </thead>
@@ -38,22 +44,22 @@ export function FiringHistory({ rows }: { rows: FiringRow[] }) {
               <td className="whitespace-nowrap px-3 py-2 font-mono tabular-nums text-muted-foreground">
                 {fmtTs(new Date(f.firedAt))}
               </td>
-              <td className="px-3 py-2 font-medium">
-                {f.ruleName}
-                <span className="ml-1.5 text-[11px] font-normal text-muted-foreground">
-                  {f.metric} · {f.windowHours}h
-                </span>
-              </td>
+              <td className="px-3 py-2 font-medium">{f.ruleName}</td>
               <td className="whitespace-nowrap px-3 py-2 font-mono text-muted-foreground">
                 {scopeLabel(f.scope)}
               </td>
-              {/* The observed value is the point: it says how far past the line things
-                  had gone, which is what tells you whether the threshold was set well. */}
-              <td className="whitespace-nowrap px-3 py-2 text-right font-mono tabular-nums font-semibold">
-                {metricValue(f.metric, f.observed)}
-              </td>
-              <td className="whitespace-nowrap px-3 py-2 text-right font-mono tabular-nums text-muted-foreground">
-                {metricValue(f.metric, f.threshold)}
+              <td className="px-3 py-2">
+                <span className="font-mono tabular-nums">{f.detail}</span>
+                {/* A keyword rule tripped on one specific call. The first thing anyone wants
+                    is to go and read it, so make that one click. */}
+                {f.requestId ? (
+                  <Link
+                    href={`/requests/${f.requestId}`}
+                    className="ml-2 text-primary underline-offset-2 hover:underline"
+                  >
+                    open the request →
+                  </Link>
+                ) : null}
               </td>
               <td className="px-3 py-2">
                 {f.actions.length === 0 ? (
