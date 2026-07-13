@@ -177,18 +177,23 @@ CREATE TABLE metrics_by_key (
   PRIMARY KEY ((project_id, api_key_id, day), ts, event_id)
 ) WITH CLUSTERING ORDER BY (ts DESC);
 
--- 대시보드 추이용 시간 단위 롤업 (ingest worker가 upsert)
+-- 대시보드 추이용 시간 단위 롤업 (ingest worker가 counter UPDATE)
 CREATE TABLE rollup_hourly (
   project_id text, dim text,  -- 'model:gpt-4o' | 'key:abc' | 'all'
   day date, hour int,
-  cost_usd double, requests bigint, errors bigint,
-  prompt_tokens bigint, completion_tokens bigint,
-  latency_sum bigint, cache_hits bigint,
+  cost_micros counter,        -- counter는 정수 전용 → 달러는 100만분의 1 단위로
+  requests counter, errors counter,
+  prompt_tokens counter, completion_tokens counter,
+  latency_sum_ms counter, cache_hits counter,
+  lat_count counter,          -- 히스토그램이 센 요청 수 (= 히스토그램의 분모)
+  lat_le_10 counter, ... lat_le_10000 counter,   -- 지연 히스토그램 [P4]
   PRIMARY KEY ((project_id, dim, day), hour)
 );
 ```
 
-주의: 대시보드의 넓은 기간 조회는 raw 테이블이 아니라 `rollup_hourly`를 읽는다. counter 타입 대신 read-modify-write 없는 누적 방식이 필요하므로, ingest worker가 배치 플러시(예: 5초 버퍼)로 롤업을 갱신한다.
+주의: 대시보드의 넓은 기간 조회는 raw 테이블이 아니라 `rollup_hourly`를 읽는다. 갱신은 **Cassandra counter**로 한다 — read-modify-write 없이 델타만 더하면 되기 때문이다. ingest worker는 배치(500건 또는 5초)를 메모리에서 (dim, hour) 버킷으로 먼저 접은 뒤 버킷당 UPDATE 한 번만 날린다. 500건이 카운터 왕복 1500번이 아니라 몇 번으로 접힌다.
+
+`lat_le_*`는 Prometheus `le` 방식의 **누적** 히스토그램이다(각 버킷은 자기 상한 *이하*의 요청 수). 누적 버킷은 덧셈이 되므로 창 전체의 백분위를 구하는 일이 다른 카운터와 똑같은 열 단위 합산이 된다. 분모는 `requests`가 아니라 `lat_count`를 쓴다 — 히스토그램이 생기기 *전에* 쓰인 행들은 `requests`만 있고 버킷이 없어서, `requests`로 나누면 그 요청들이 전부 최상위 버킷을 넘긴 것처럼 보여 p99가 천장에 붙는다. 히스토그램은 자기 분모를 직접 들고 다녀야 한다.
 
 ### 7.3 MongoDB (유연한 문서 담당)
 
