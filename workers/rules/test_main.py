@@ -9,6 +9,7 @@ here, cheaply, on every run.
 
 from __future__ import annotations
 
+import json
 from datetime import date, datetime, timezone
 
 import pytest
@@ -17,9 +18,13 @@ from main import (
     EMPTY_WINDOW,
     Window,
     dims_of,
+    email_body,
     evaluate,
+    firing_doc,
     metric_value,
     percentile,
+    scope_query,
+    webhook_payload,
     window_days,
 )
 
@@ -196,3 +201,91 @@ def test_a_field_less_event_still_maps_onto_the_axes_ingest_wrote():
     # ingest defaults a missing model/key to "unknown" and rolls it up under that
     # name. If this defaulted differently, the rule would watch a dim that has no row.
     assert dims_of({}) == ("all", "model:unknown", "key:unknown")
+
+
+# --------------------------------------------------------------------------- #
+# scope_query — the Mongo mirror of the rollup dim
+# --------------------------------------------------------------------------- #
+START = datetime(2026, 7, 13, 13, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 7, 13, 14, 30, tzinfo=timezone.utc)
+
+
+def test_a_scoped_query_selects_the_same_requests_the_counters_counted():
+    # The `tag` action labels the requests that made up the breach. If this selected a
+    # different set than the rollup dim aggregated, the tag would point at the wrong
+    # calls — and look authoritative doing it.
+    assert scope_query("key:key_abc", START, NOW) == {
+        "ts": {"$gte": START, "$lte": NOW},
+        "api_key_id": "key_abc",
+    }
+    assert scope_query("model:gpt-4o", START, NOW) == {
+        "ts": {"$gte": START, "$lte": NOW},
+        "model": "gpt-4o",
+    }
+    assert scope_query("all", START, NOW) == {"ts": {"$gte": START, "$lte": NOW}}
+
+
+def test_a_scope_is_always_bounded_by_the_window():
+    # Every branch carries the ts bound. Drop it on one and a tag action would sweep
+    # the entire retention period instead of the hour that actually tripped.
+    for scope in ("all", "model:gpt-4o", "key:key_abc"):
+        assert scope_query(scope, START, NOW)["ts"] == {"$gte": START, "$lte": NOW}
+
+
+def test_an_unknown_scope_is_refused_rather_than_matching_everything():
+    # A typo'd scope must not silently degrade into "all" — that would tag, or block,
+    # far more than the rule asked for.
+    with pytest.raises(ValueError, match="unknown scope"):
+        scope_query("project:default", START, NOW)
+
+
+# --------------------------------------------------------------------------- #
+# What the human receives
+# --------------------------------------------------------------------------- #
+def _firing() -> tuple[dict, dict]:
+    rule = {
+        "_id": "rule_cost",
+        "name": "Hourly spend over $1.50",
+        "scope": "key:key_abc",
+        "condition": {"metric": "cost", "window_hours": 1, "threshold": 1.5},
+        "cooldown_seconds": 1800,
+    }
+    return rule, firing_doc(rule, 2.38916, NOW)
+
+
+def test_the_email_says_what_tripped_by_how_much_and_when_it_will_speak_again():
+    # An alert that only says "a rule fired" makes its reader go and look, which is
+    # exactly the work the alert existed to save.
+    rule, firing = _firing()
+    body = email_body(rule, firing)
+
+    assert "Hourly spend over $1.50" in body
+    assert "key:key_abc" in body     # what
+    assert "cost" in body            # which metric
+    assert "1.5" in body             # the threshold
+    assert "2.38916" in body         # and what was actually seen
+    assert "last 1h" in body         # over what window
+    assert "1800s" in body           # and when they'll hear from it again
+
+
+def test_one_webhook_payload_reads_in_slack_discord_and_anything_else():
+    # Slack renders `text`, Discord renders `content`. Sending both costs nothing and
+    # saves a per-vendor template, which is the kind of thing that rots quietly.
+    rule, firing = _firing()
+    payload = webhook_payload(rule, firing)
+
+    assert payload["text"] == payload["content"]
+    assert "2.38916" in payload["text"] and "1.5" in payload["text"]
+    # The structured fields are there for anything that isn't a chat app.
+    assert payload["rule_id"] == "rule_cost"
+    assert payload["observed"] == 2.38916
+    assert payload["threshold"] == 1.5
+    assert payload["scope"] == "key:key_abc"
+
+
+def test_the_payload_is_json_serialisable():
+    # fired_at is a datetime on the firing document and json.dumps would refuse it —
+    # the payload has to hand over a string. This is the kind of thing that only fails
+    # in production, at 3am, on the one path nobody exercised.
+    rule, firing = _firing()
+    assert json.loads(json.dumps(webhook_payload(rule, firing)))["fired_at"].startswith("2026-07-13")

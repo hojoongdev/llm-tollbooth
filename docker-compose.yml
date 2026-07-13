@@ -238,6 +238,8 @@ services:
         condition: service_completed_successfully
       mongodb:
         condition: service_healthy
+      mailpit:
+        condition: service_healthy
     environment:
       KAFKA_BOOTSTRAP: kafka:29092
       KAFKA_TOPIC: llm.events
@@ -248,6 +250,14 @@ services:
       MONGO_DB: tollbooth
       PROJECT_ID: default
       RULES_EVAL_SECONDS: ${RULES_EVAL_SECONDS:-20}
+      # Point at the bundled Mailpit by default, so email alerts work out of the box
+      # with no account, no credentials and nothing that could reach a real inbox.
+      # Override these for a real relay; SMTP_USER is what turns on STARTTLS.
+      SMTP_HOST: ${SMTP_HOST:-mailpit}
+      SMTP_PORT: ${SMTP_PORT:-1025}
+      SMTP_FROM: ${SMTP_FROM:-alerts@tollbooth.local}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
     restart: unless-stopped
 
   # Console + read API. Server components read hourly rollups from Cassandra

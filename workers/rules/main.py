@@ -1,8 +1,9 @@
-"""rules worker — decide when something is worth telling someone about.
+"""rules worker — decide when something is worth telling someone about, then tell them.
 
-A rule is a condition, a scope, a cooldown and (from the next increment) a set of
-actions. This worker consumes llm.events on its own Kafka consumer group and, on a
-timer, evaluates every enabled rule against the hourly rollup.
+A rule is a condition, a scope, a cooldown and a set of actions. This worker consumes
+llm.events on its own Kafka consumer group and, on a timer, evaluates every enabled
+rule against the hourly rollup — then emails, posts a webhook, blocks the key or tags
+the requests that made up the breach.
 
 Why the rollup rather than the event stream:
   A rule asks a question about a *window* — "has this key spent more than $5 in the
@@ -40,11 +41,14 @@ from __future__ import annotations
 import json
 import os
 import signal
+import smtplib
 import sys
 import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
+from email.message import EmailMessage
 from typing import Sequence
+from urllib import request as urlrequest
 
 from cassandra.cluster import Cluster, Session
 from cassandra.query import PreparedStatement
@@ -74,8 +78,31 @@ PROJECT = os.environ.get("PROJECT_ID", "default")
 # shows up late.
 EVAL_SECONDS = float(os.environ.get("RULES_EVAL_SECONDS", "20"))
 
+# --- Alert delivery ---
+# The defaults point at the bundled Mailpit, so a bare `docker compose up` has working
+# email alerts with nothing to configure — and nothing real to leak. A production relay
+# would set SMTP_USER, which is also the switch that turns on STARTTLS: Mailpit takes no
+# credentials and offers no TLS, and demanding either would break the out-of-the-box path.
+SMTP_HOST = os.environ.get("SMTP_HOST", "mailpit")
+SMTP_PORT = int(os.environ.get("SMTP_PORT", "1025"))
+SMTP_FROM = os.environ.get("SMTP_FROM", "alerts@tollbooth.local")
+SMTP_USER = os.environ.get("SMTP_USER", "")
+SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
+
+# An action reaches out to something that can hang — an SMTP relay, someone's webhook
+# endpoint. It does so on the evaluation loop, so it gets a leash.
+ACTION_TIMEOUT = float(os.environ.get("RULES_ACTION_TIMEOUT", "10"))
+
+# How many request documents one `tag` action will touch. A rule scoped to `all` over
+# 24h could match every document in the window, and a firing must not turn into a
+# minutes-long write storm. The cap is announced in the firing record rather than
+# applied quietly — a tag that silently covered 5k of 40k requests would make the
+# dashboard filter lie.
+TAG_LIMIT = int(os.environ.get("RULES_TAG_LIMIT", "5000"))
+
 # The metrics a threshold can be written against (spec §4 group C).
 METRICS = ("cost", "tokens", "latency_p95", "error_rate", "request_count")
+ACTIONS = ("email", "webhook", "block", "tag")
 
 _running = True
 
@@ -103,17 +130,41 @@ def connect_cassandra() -> tuple[Cluster, Session]:
     raise RuntimeError(f"could not connect to Cassandra: {last_err}")
 
 
-def connect_mongo():
+@dataclass
+class Store:
+    """The Mongo collections this worker touches.
+
+    Two of them it owns (rules, rule_firings) and two it reaches into: `api_keys`,
+    to block one, and `requests`, to tag some. Both of those already have other
+    writers — the console owns api_keys, and the gateway and ingest worker each
+    write half of every request document. So every write here is a targeted $set or
+    $addToSet on a field nobody else touches, never a replace.
+    """
+
+    client: MongoClient
+    rules: object
+    firings: object
+    api_keys: object
+    requests: object
+
+
+def connect_mongo() -> Store:
     client = MongoClient(MONGO_URI)
     db = client[MONGO_DB]
-    rules, firings = db["rules"], db["rule_firings"]
+    store = Store(
+        client=client,
+        rules=db["rules"],
+        firings=db["rule_firings"],
+        api_keys=db["api_keys"],
+        requests=db["requests"],
+    )
     # Idempotent, and created here rather than in a seed script for the same reason
-    # every other index in this project is (see gateway/src/keys.ts): the service
-    # that depends on an index is the service that should guarantee it.
-    rules.create_index("enabled")
-    firings.create_index([("fired_at", DESCENDING)])
-    firings.create_index("rule_id")
-    return client, rules, firings
+    # every other index in this project is (see gateway/src/keys.ts): the service that
+    # depends on an index is the service that should guarantee it.
+    store.rules.create_index("enabled")
+    store.firings.create_index([("fired_at", DESCENDING)])
+    store.firings.create_index("rule_id")
+    return store
 
 
 def latency_bounds(session: Session) -> tuple[int, ...]:
@@ -334,10 +385,10 @@ def claim(rules_coll, rule: dict, now: datetime) -> bool:
     return claimed is not None
 
 
-def record_firing(firings_coll, rule: dict, observed: float, now: datetime) -> None:
-    """Write down that this happened. The console's firing history reads this."""
+def firing_doc(rule: dict, observed: float, now: datetime) -> dict:
+    """What happened, in the shape the console's firing history reads."""
     condition = rule["condition"]
-    firings_coll.insert_one({
+    return {
         "rule_id": rule["_id"],
         "rule_name": rule.get("name"),
         "fired_at": now,
@@ -346,31 +397,205 @@ def record_firing(firings_coll, rule: dict, observed: float, now: datetime) -> N
         "window_hours": int(condition.get("window_hours") or 1),
         "threshold": float(condition["threshold"]),
         "observed": observed,
-        # Filled in once the actions land — an empty list here means the rule tripped
-        # and nobody was told, which is exactly what this increment does.
-        "actions": [],
-    })
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Actions — the part with side effects
+# --------------------------------------------------------------------------- #
+def scope_query(scope: str, start: datetime, now: datetime) -> dict:
+    """The request documents a scope covers over a window.
+
+    The Mongo mirror of the rollup `dim` the condition was judged against. It has to
+    select the same requests the counters counted, or a `tag` action would label a
+    different set of calls than the one that tripped the rule.
+    """
+    query: dict = {"ts": {"$gte": start, "$lte": now}}
+    if scope.startswith("model:"):
+        query["model"] = scope[len("model:"):]
+    elif scope.startswith("key:"):
+        query["api_key_id"] = scope[len("key:"):]
+    elif scope != "all":
+        raise ValueError(f"unknown scope: {scope!r}")
+    return query
+
+
+def email_body(rule: dict, firing: dict) -> str:
+    """What the human actually reads.
+
+    It has to answer, without them opening anything: what tripped, on what, by how
+    much, over what window — and when they will hear about it again. An alert that
+    only says "a rule fired" makes them go and look, which is the work the alert was
+    supposed to save.
+    """
+    return (
+        f"{rule.get('name') or rule['_id']} fired.\n"
+        f"\n"
+        f"  scope      {firing['scope']}\n"
+        f"  metric     {firing['metric']}\n"
+        f"  window     last {firing['window_hours']}h\n"
+        f"  threshold  {firing['threshold']:g}\n"
+        f"  observed   {firing['observed']:.6g}\n"
+        f"  fired at   {firing['fired_at'].isoformat()}\n"
+        f"\n"
+        f"Silenced for the next {int(rule.get('cooldown_seconds') or 0)}s.\n"
+    )
+
+
+def act_email(rule: dict, firing: dict, action: dict) -> str:
+    to = str(action.get("to") or "").strip()
+    if not to:
+        raise ValueError("email action has no recipient")
+
+    msg = EmailMessage()
+    msg["Subject"] = f"[tollbooth] {rule.get('name') or rule['_id']}"
+    msg["From"] = SMTP_FROM
+    msg["To"] = to
+    msg.set_content(email_body(rule, firing))
+
+    with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=ACTION_TIMEOUT) as smtp:
+        if SMTP_USER:
+            smtp.starttls()
+            smtp.login(SMTP_USER, SMTP_PASSWORD)
+        smtp.send_message(msg)
+    return f"sent to {to}"
+
+
+def webhook_payload(rule: dict, firing: dict) -> dict:
+    """One body that Slack, Discord and a plain endpoint can all read.
+
+    Slack renders `text`, Discord renders `content`, and anything bespoke gets the
+    structured fields. Sending all three costs nothing and saves a per-vendor
+    template, which is the kind of thing that rots.
+    """
+    summary = (
+        f"[tollbooth] {rule.get('name') or rule['_id']}: {firing['metric']} "
+        f"{firing['observed']:.6g} over {firing['threshold']:g} on {firing['scope']} "
+        f"({firing['window_hours']}h)"
+    )
+    return {
+        "rule_id": rule["_id"],
+        "rule_name": rule.get("name"),
+        "scope": firing["scope"],
+        "metric": firing["metric"],
+        "window_hours": firing["window_hours"],
+        "threshold": firing["threshold"],
+        "observed": firing["observed"],
+        "fired_at": firing["fired_at"].isoformat(),
+        "text": summary,
+        "content": summary,
+    }
+
+
+def act_webhook(rule: dict, firing: dict, action: dict) -> str:
+    url = str(action.get("url") or "").strip()
+    if not url:
+        raise ValueError("webhook action has no url")
+
+    req = urlrequest.Request(
+        url,
+        data=json.dumps(webhook_payload(rule, firing)).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urlrequest.urlopen(req, timeout=ACTION_TIMEOUT) as resp:  # noqa: S310 — the URL is the user's own rule
+        return f"POST {url} -> {resp.status}"
+
+
+def act_block(store: Store, firing: dict) -> str:
+    """Flip the key to blocked. The gateway already refuses blocked keys on every
+    chat request, so this is the entire enforcement — one $set on the same field the
+    console's own Block button writes."""
+    scope = firing["scope"]
+    if not scope.startswith("key:"):
+        # 'all' would take the whole gateway down on one bad hour, and a model is not
+        # something the gateway can refuse — it authenticates keys, not models.
+        raise ValueError(f"block needs a key-scoped rule, got scope {scope!r}")
+
+    key_id = scope[len("key:"):]
+    result = store.api_keys.update_one({"_id": key_id}, {"$set": {"status": "blocked"}})
+    if result.matched_count == 0:
+        raise ValueError(f"no such api key: {key_id}")
+    return f"blocked {key_id}"
+
+
+def act_tag(store: Store, firing: dict, action: dict, start: datetime, now: datetime) -> str:
+    """Label the requests that made up the breach, so the Requests screen can filter
+    to exactly them."""
+    tag = str(action.get("tag") or "").strip()
+    if not tag:
+        raise ValueError("tag action has no tag")
+
+    query = scope_query(firing["scope"], start, now)
+    ids = [
+        doc["_id"]
+        for doc in store.requests.find(query, {"_id": 1}).sort("ts", DESCENDING).limit(TAG_LIMIT)
+    ]
+    if not ids:
+        return "no requests in the window to tag"
+
+    # $addToSet on a field no other writer touches. The request document already has
+    # two authors — the gateway writes the prompt and response, the ingest worker
+    # writes the metrics — and they coexist because neither ever replaces the doc.
+    # This is the third, on the same terms.
+    result = store.requests.update_many({"_id": {"$in": ids}}, {"$addToSet": {"tags": tag}})
+    capped = f" (capped at {TAG_LIMIT})" if len(ids) >= TAG_LIMIT else ""
+    return f"tagged {result.modified_count} requests as {tag!r}{capped}"
+
+
+def run_actions(store: Store, rule: dict, firing: dict, start: datetime, now: datetime) -> list[dict]:
+    """Run a rule's actions. Let none of them stop the others.
+
+    They run *after* the cooldown has been claimed, and that ordering is deliberate: a
+    failed email is not retried until the cooldown expires. A worker that kept retrying
+    a failing webhook every twenty seconds would defeat the one mechanism standing
+    between a human and an alert storm — so the failure is recorded on the firing,
+    where the console can show it, and left alone.
+    """
+    results: list[dict] = []
+
+    for action in rule.get("actions") or []:
+        kind = action.get("type")
+        try:
+            if kind == "email":
+                detail = act_email(rule, firing, action)
+            elif kind == "webhook":
+                detail = act_webhook(rule, firing, action)
+            elif kind == "block":
+                detail = act_block(store, firing)
+            elif kind == "tag":
+                detail = act_tag(store, firing, action, start, now)
+            else:
+                raise ValueError(f"unknown action type: {kind!r} (expected one of {', '.join(ACTIONS)})")
+        except Exception as exc:  # noqa: BLE001 — one broken action must not silence the rest
+            results.append({"type": kind, "ok": False, "detail": str(exc)})
+            print(f"rules: {rule['_id']} -> {kind} FAILED: {exc}", file=sys.stderr, flush=True)
+            continue
+
+        results.append({"type": kind, "ok": True, "detail": detail})
+        print(f"rules: {rule['_id']} -> {kind}: {detail}", flush=True)
+
+    return results
 
 
 def run_pass(
     session,
     stmts,
     bounds: Sequence[int],
-    rules_coll,
-    firings_coll,
+    store: Store,
     scopes: set[str] | None,
 ) -> int:
     """Evaluate every enabled rule once. `scopes=None` means "all of them".
 
-    Rules on the same (scope, window) share one Cassandra read — several rules
-    watching cost, tokens and error rate on the same key is the common case, and it
-    is one question to the rollup, not three.
+    Rules on the same (scope, window) share one Cassandra read — several rules watching
+    cost, tokens and error rate on the same key is the common case, and it is one
+    question to the rollup, not three.
     """
     now = datetime.now(timezone.utc)
     windows: dict[tuple[str, int], Window] = {}
     fired = 0
 
-    for rule in rules_coll.find({"enabled": True}):
+    for rule in store.rules.find({"enabled": True}):
         scope = rule.get("scope") or "all"
         if scopes is not None and scope not in scopes:
             continue
@@ -385,21 +610,27 @@ def run_pass(
         try:
             tripped, observed = evaluate(condition, windows[key])
         except (KeyError, ValueError, TypeError) as exc:
-            # A malformed rule is the console's bug, not a reason to stop watching
-            # every other rule.
+            # A malformed rule is the console's bug, not a reason to stop watching every
+            # other rule.
             print(f"rules: skipping {rule['_id']}: {exc}", file=sys.stderr, flush=True)
             continue
 
-        if not tripped or not claim(rules_coll, rule, now):
+        # Claim before acting. The cooldown has to be taken before a single email goes
+        # out, or two workers racing on the same tripped rule would both send one.
+        if not tripped or not claim(store.rules, rule, now):
             continue
 
-        record_firing(firings_coll, rule, observed, now)
-        fired += 1
         print(
             f"rules: {rule['_id']} fired — {condition.get('metric')}={observed:.4g} "
             f"over {condition.get('threshold')} on {scope} ({hours}h)",
             flush=True,
         )
+
+        firing = firing_doc(rule, observed, now)
+        _, start = window_days(firing["window_hours"], now)
+        firing["actions"] = run_actions(store, rule, firing, start, now)
+        store.firings.insert_one(firing)
+        fired += 1
 
     return fired
 
@@ -435,7 +666,7 @@ def main() -> None:
     cluster, session = connect_cassandra()
     bounds = latency_bounds(session)
     stmts = prepare(session, bounds)
-    mongo_client, rules_coll, firings_coll = connect_mongo()
+    store = connect_mongo()
 
     consumer = build_consumer()
     consumer.subscribe([TOPIC])
@@ -443,7 +674,7 @@ def main() -> None:
         f"rules: consuming '{TOPIC}' from {BOOTSTRAP} as group '{GROUP_ID}' -> "
         f"evaluating every {EVAL_SECONDS:g}s against Cassandra "
         f"{CASSANDRA_CONTACT_POINTS}/{CASSANDRA_KEYSPACE}; "
-        f"latency ladder {list(bounds)}",
+        f"latency ladder {list(bounds)}; mail via {SMTP_HOST}:{SMTP_PORT}",
         flush=True,
     )
 
@@ -475,7 +706,7 @@ def main() -> None:
 
             if check_everything or active:
                 run_pass(
-                    session, stmts, bounds, rules_coll, firings_coll,
+                    session, stmts, bounds, store,
                     None if check_everything else set(active),
                 )
                 check_everything = False
@@ -491,7 +722,7 @@ def main() -> None:
     finally:
         consumer.close()
         cluster.shutdown()
-        mongo_client.close()
+        store.client.close()
         print("rules: shutting down", flush=True)
 
 
