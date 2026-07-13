@@ -93,6 +93,13 @@ SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
 # endpoint. It does so on the evaluation loop, so it gets a leash.
 ACTION_TIMEOUT = float(os.environ.get("RULES_ACTION_TIMEOUT", "10"))
 
+# --- Telling the gateway ---
+# Blocking a key is a Mongo write, and the gateway caches key state for 30 seconds —
+# so without this the block is advisory for half a minute (measured: 31s). These let
+# the block take effect now instead. Unset, the block still lands; it just lands late.
+GATEWAY_URL = os.environ.get("GATEWAY_URL", "")
+GATEWAY_INTERNAL_TOKEN = os.environ.get("GATEWAY_INTERNAL_TOKEN", "")
+
 # How many request documents one `tag` action will touch. A rule scoped to `all` over
 # 24h could match every document in the window, and a firing must not turn into a
 # minutes-long write storm. The cap is announced in the firing record rather than
@@ -502,10 +509,45 @@ def act_webhook(rule: dict, firing: dict, action: dict) -> str:
         return f"POST {url} -> {resp.status}"
 
 
+def tell_gateway_to_forget_its_keys() -> str:
+    """Ask the gateway to drop its key cache, so the block just written takes effect now.
+
+    Deliberately returns a note instead of raising. The block *is* the Mongo write —
+    that is the durable truth, and the gateway will honour it within 30 seconds no
+    matter what happens here. All this decides is whether those 30 seconds happen. So a
+    gateway that cannot be reached is worth saying out loud on the firing record, but
+    it is not a failed block, and raising would mark the action failed and tell the
+    operator the opposite of what is true.
+    """
+    if not GATEWAY_URL or not GATEWAY_INTERNAL_TOKEN:
+        return " (gateway not wired up; the block lands when its key cache expires)"
+
+    # An empty `{}` rather than no body at all: Fastify refuses a POST that carries a
+    # Content-Length without a Content-Type (415), and there is nothing to say here —
+    # the route takes no arguments, it just forgets everything.
+    req = urlrequest.Request(
+        f"{GATEWAY_URL.rstrip('/')}/internal/keys/invalidate",
+        data=b"{}",
+        headers={
+            "X-Internal-Token": GATEWAY_INTERNAL_TOKEN,
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urlrequest.urlopen(req, timeout=ACTION_TIMEOUT):  # noqa: S310 — our own gateway
+            return ", gateway cache dropped (effective now)"
+    except Exception as exc:  # noqa: BLE001 — the block already landed; this is only its latency
+        return f" (gateway not reachable: {exc}; the block lands within 30s regardless)"
+
+
 def act_block(store: Store, firing: dict) -> str:
-    """Flip the key to blocked. The gateway already refuses blocked keys on every
-    chat request, so this is the entire enforcement — one $set on the same field the
-    console's own Block button writes."""
+    """Flip the key to blocked, then tell the gateway.
+
+    The flip is the whole enforcement: the gateway already refuses blocked keys on
+    every chat request, and this writes the same field the console's own Block button
+    writes. The telling is only about *when* — see above.
+    """
     scope = firing["scope"]
     if not scope.startswith("key:"):
         # 'all' would take the whole gateway down on one bad hour, and a model is not
@@ -516,7 +558,8 @@ def act_block(store: Store, firing: dict) -> str:
     result = store.api_keys.update_one({"_id": key_id}, {"$set": {"status": "blocked"}})
     if result.matched_count == 0:
         raise ValueError(f"no such api key: {key_id}")
-    return f"blocked {key_id}"
+
+    return f"blocked {key_id}{tell_gateway_to_forget_its_keys()}"
 
 
 def act_tag(store: Store, firing: dict, action: dict, start: datetime, now: datetime) -> str:

@@ -159,6 +159,12 @@ services:
       # GATEWAY_DEFAULT_KEY pins that key so it survives a restart.
       AUTH_MODE: ${AUTH_MODE:-none}
       GATEWAY_DEFAULT_KEY: ${GATEWAY_DEFAULT_KEY:-}
+      # Shared secret for /internal — how the console and the rules worker tell the
+      # gateway to drop its key cache, so a block takes effect on the next call
+      # instead of within 30 seconds. Not a credential to anything: the one route it
+      # guards flushes a cache and reads nothing. Change it anyway if you publish the
+      # gateway's port; unset it and /internal simply isn't registered.
+      GATEWAY_INTERNAL_TOKEN: ${GATEWAY_INTERNAL_TOKEN:-local-dev-internal}
       # Real providers. A model whose provider has no key here is served by the
       # mock instead — which is why the stack works on a fresh clone, and why
       # switching to the real thing is one line in .env and nothing else.
@@ -258,6 +264,10 @@ services:
       SMTP_FROM: ${SMTP_FROM:-alerts@tollbooth.local}
       SMTP_USER: ${SMTP_USER:-}
       SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      # So a `block` action takes effect on the gateway's next call rather than
+      # whenever its 30s key cache happens to expire.
+      GATEWAY_URL: http://gateway:8080
+      GATEWAY_INTERNAL_TOKEN: ${GATEWAY_INTERNAL_TOKEN:-local-dev-internal}
     restart: unless-stopped
 
   # Console + read API. Server components read hourly rollups from Cassandra
@@ -283,6 +293,11 @@ services:
       MONGO_URI: mongodb://mongodb:27017
       MONGO_DB: tollbooth
       PROJECT_ID: default
+      # Blocking or revoking a key from the console has to reach the gateway, which
+      # caches key state for 30s. Without these the button would be right and the
+      # gateway would be wrong, for half a minute.
+      GATEWAY_URL: http://gateway:8080
+      GATEWAY_INTERNAL_TOKEN: ${GATEWAY_INTERNAL_TOKEN:-local-dev-internal}
       # Console login (spec §6). Empty by default => open console; set AUTH_MODE=single
       # plus the three values below in .env to require a login. No code changes.
       AUTH_MODE: ${AUTH_MODE:-none}

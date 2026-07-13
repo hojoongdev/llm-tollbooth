@@ -53,6 +53,16 @@ export const AUTH_MODE = process.env.AUTH_MODE ?? "none";
 /** Pins that auto-provisioned key across restarts. Empty => a fresh random one. */
 export const DEFAULT_KEY = process.env.GATEWAY_DEFAULT_KEY ?? "";
 
+/**
+ * Shared secret for /internal — the routes the rest of the stack calls, rather than
+ * the ones customers do (routes/admin.ts).
+ *
+ * Empty turns them off, and that is the right failure: an unauthenticated endpoint
+ * anyone can reach is a worse thing to ship than the 30 seconds of staleness it
+ * exists to remove. The gateway says so at boot rather than quietly going without.
+ */
+export const INTERNAL_TOKEN = process.env.GATEWAY_INTERNAL_TOKEN ?? "";
+
 // --- Real providers ---
 // A provider with no key configured simply isn't registered, and its models fall
 // through to the mock (providers/index.ts). That is what makes "clone it and it

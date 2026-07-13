@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 
 import { authenticate } from "../auth.js";
+import { errorBody } from "../errors.js";
 import { knownModels } from "../pricing.js";
 
 /**
@@ -10,7 +11,16 @@ import { knownModels } from "../pricing.js";
  * What we can serve is what we can price, so the pricing table is the catalogue.
  */
 export function registerModels(app: FastifyInstance): void {
-  app.get("/v1/models", { preHandler: authenticate }, async () => {
+  app.get("/v1/models", { preHandler: authenticate }, async (req, reply) => {
+    // A blocked key cannot call anything, so it has no business browsing the
+    // catalogue either. chat.ts has always refused it; this was the one other
+    // authenticated surface, and it was answering.
+    if (req.apiKey?.status === "blocked") {
+      return reply
+        .code(403)
+        .send(errorBody("This API key is blocked.", "invalid_request_error", "key_blocked"));
+    }
+
     const models = await knownModels();
     return {
       object: "list",
