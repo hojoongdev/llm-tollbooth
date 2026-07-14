@@ -78,6 +78,14 @@ export const SELFHOST_API_KEY = process.env.SELFHOST_API_KEY ?? "";
 /** A provider that has stopped answering must not hold our caller's socket open. */
 export const PROVIDER_TIMEOUT_MS = int(process.env.PROVIDER_TIMEOUT_MS, 60_000);
 
+/**
+ * The model a call falls back to when its primary provider errors or times out
+ * (spec §4 B). Empty = no global fallback. A per-key `fallback_model` overrides
+ * this, and the fallback may be a different provider entirely — it is resolved
+ * through the same pricing/routing table as any other model.
+ */
+export const FALLBACK_MODEL = process.env.GATEWAY_FALLBACK_MODEL ?? "";
+
 // --- Mock provider ---
 // The built-in fake LLM that lets the whole stack demo without a provider key.
 // Latency is configurable because it is also the baseline we subtract when
