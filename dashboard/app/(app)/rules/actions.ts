@@ -99,6 +99,22 @@ function conditionFrom(
     };
   }
 
+  if (kind === "quality_drop") {
+    const minScore = num(form, "min_score", NaN);
+    // Scores are 1..5 by construction (the judge's rubric), so a floor outside that is a
+    // rule that can never fire, or one that always does.
+    if (!Number.isFinite(minScore) || minScore <= 1 || minScore > 5) {
+      return { fields: {}, error: "Quality is scored 1–5, so the floor has to sit above 1 and at most 5." };
+    }
+    const minSamples = num(form, "min_samples", NaN);
+    if (!Number.isFinite(minSamples) || minSamples < 1) {
+      return { fields: {}, error: "The rule needs at least one scored call before it can average anything." };
+    }
+    return {
+      fields: { minScore, minSamples: Math.round(minSamples), windowHours: num(form, "window_hours", 24) },
+    };
+  }
+
   const metric = oneOf<Metric>(METRICS, form.get("metric"), "cost");
   const threshold = num(form, "threshold", NaN);
   if (!Number.isFinite(threshold) || threshold < 0) {

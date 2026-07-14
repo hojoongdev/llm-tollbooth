@@ -62,6 +62,11 @@ function toRule(d: Record<string, any>): RuleRow {
 
     keyword: String(c.keyword ?? ""),
     matchedIn: oneOf<KeywordTarget>(KEYWORD_TARGETS, c.matched_in, "either"),
+
+    minScore: Number(c.min_score ?? 3.5),
+    // Mirrors the worker's RULES_MIN_QUALITY_SAMPLES default. Eval samples, so an average
+    // can rest on very few calls, and a rule that fires on one of them is noise.
+    minSamples: Number(c.min_samples ?? 5),
   };
 }
 
@@ -103,6 +108,8 @@ export interface NewRule {
   percent?: number;
   keyword?: string;
   matchedIn?: KeywordTarget;
+  minScore?: number;
+  minSamples?: number;
 }
 
 /**
@@ -118,6 +125,13 @@ function conditionOf(r: NewRule): Record<string, unknown> {
       return { type: "budget_percent", period: r.period, percent: r.percent };
     case "keyword_match":
       return { type: "keyword_match", keyword: r.keyword, matched_in: r.matchedIn };
+    case "quality_drop":
+      return {
+        type: "quality_drop",
+        min_score: r.minScore,
+        min_samples: r.minSamples,
+        window_hours: r.windowHours,
+      };
     default:
       return {
         type: "metric_threshold",
@@ -160,6 +174,7 @@ export async function setRuleTuning(
   const set: Record<string, unknown> = { cooldown_seconds: cooldownSeconds };
   if (kind === "metric_threshold") set["condition.threshold"] = value;
   if (kind === "budget_percent") set["condition.percent"] = value;
+  if (kind === "quality_drop") set["condition.min_score"] = value;
 
   await rules().updateOne({ _id: id as never }, { $set: set });
 }

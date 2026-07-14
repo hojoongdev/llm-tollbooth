@@ -157,6 +157,41 @@ export function NewRuleForm({ keys, models }: { keys: ScopeOption[]; models: str
             </>
           ) : null}
 
+          {kind === "quality_drop" ? (
+            <>
+              {/* 24h by default, unlike a threshold rule's 1h: eval samples, so an hour of
+                  ordinary traffic may hold only a handful of scores — and an average needs
+                  more than a handful to mean anything. */}
+              <SelectField label="Window" name="window_hours" defaultValue="24" className="w-28">
+                <option value="1">Last 1h</option>
+                <option value="24">Last 24h</option>
+              </SelectField>
+
+              <Field
+                label="Below (1–5)"
+                name="min_score"
+                type="number"
+                step="0.1"
+                min="1"
+                max="5"
+                required
+                defaultValue={3.5}
+                className="w-32"
+              />
+
+              <Field
+                label="Min scored"
+                name="min_samples"
+                type="number"
+                step="1"
+                min="1"
+                required
+                defaultValue={5}
+                className="w-32"
+              />
+            </>
+          ) : null}
+
           <Field
             label="Cooldown (min)"
             name="cooldown_minutes"
@@ -224,6 +259,16 @@ function Hint({ kind }: { kind: ConditionKind }) {
         — 따라서 게이트웨이를 실제로 통과한 호출에만 걸립니다 (loadgen 합성 이벤트에는 본문이 없습니다). 대소문자는
         구분하지 않습니다. 태그 액션은 창 전체가 아니라 <strong className="font-medium">걸린 그 요청 하나</strong>에만
         붙습니다.
+      </>
+    );
+  }
+  if (kind === "quality_drop") {
+    return (
+      <>
+        평가는 <strong className="font-medium">샘플링</strong>이라, 평균은 채점된 호출 수로 나눕니다 (전체 요청 수가
+        아니라). 그래서 <strong className="font-medium">채점 건수가 최소치에 못 미치면 발화하지 않습니다</strong> — 한
+        건 채점된 답이 2점이라고 새벽에 사람을 깨우는 건 신호가 아니라 잡음입니다. 채점이 하나도 없는 창도 마찬가지로
+        조용합니다 (0점이 아니라 &ldquo;모름&rdquo;이니까요). Settings 에서 샘플링 비율을 올리면 더 빨리 쌓입니다.
       </>
     );
   }
