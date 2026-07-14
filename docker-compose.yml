@@ -284,6 +284,53 @@ services:
       GATEWAY_INTERNAL_TOKEN: ${GATEWAY_INTERNAL_TOKEN:-local-dev-internal}
     restart: unless-stopped
 
+  # Eval worker: samples calls and scores their quality with a judge LLM (P5).
+  #
+  # Two loops in one process, with llm.eval.tasks between them: a sampler that reads
+  # llm.events and cheaply decides what is worth grading, and a scorer that makes the
+  # slow judge call. The topic is what keeps the slow half from stalling the fast one.
+  #
+  # The judge is the gateway itself — so evaluation works with no external API key
+  # (the mock answers), and pointing EVAL_MODEL at a real low-cost model is one line.
+  # It depends on the gateway for that reason, and provisions its own API key in Mongo
+  # on boot.
+  eval:
+    build: ./workers/eval
+    image: llm-tollbooth/eval
+    container_name: llm-tollbooth-eval
+    depends_on:
+      kafka:
+        condition: service_healthy
+      cassandra:
+        condition: service_healthy
+      cassandra-init:
+        condition: service_completed_successfully
+      mongodb:
+        condition: service_healthy
+      gateway:
+        condition: service_healthy
+    environment:
+      KAFKA_BOOTSTRAP: kafka:29092
+      KAFKA_TOPIC: llm.events
+      KAFKA_EVAL_TOPIC: llm.eval.tasks
+      CASSANDRA_CONTACT_POINTS: cassandra
+      CASSANDRA_KEYSPACE: tollbooth
+      MONGO_URI: mongodb://mongodb:27017
+      MONGO_DB: tollbooth
+      PROJECT_ID: default
+      # Seeds the settings document the console then owns (Settings screen). Editing
+      # it there takes effect within EVAL_SETTINGS_REFRESH_SECONDS — no restart.
+      # Whole-corpus evaluation costs a judge call per request; 10% is the spec's default.
+      EVAL_SAMPLE_RATE: ${EVAL_SAMPLE_RATE:-0.1}
+      EVAL_MODEL: ${EVAL_MODEL:-gpt-4o-mini}
+      # Empty = evaluate every model / every key. Comma-separated to narrow it.
+      EVAL_MODELS: ${EVAL_MODELS:-}
+      EVAL_KEYS: ${EVAL_KEYS:-}
+      # The worker calls the gateway like any other client, with its own key.
+      GATEWAY_URL: http://gateway:8080
+      EVAL_API_KEY: ${EVAL_API_KEY:-tb_eval_worker_key}
+    restart: unless-stopped
+
   # Console + read API. Server components read hourly rollups from Cassandra
   # (trends/cards) and request documents from MongoDB (log + detail). P2 ships
   # the Overview and Requests screens.
