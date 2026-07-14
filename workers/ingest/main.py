@@ -5,8 +5,8 @@ P2 scope: every event is written three ways, all off the gateway's hot path.
   Cassandra  metrics_by_model / metrics_by_key  — one raw row per event, so the
              dashboard can drill into "recent calls for model/key X today".
   Cassandra  rollup_hourly                       — hourly counters (cost, requests,
-             errors, tokens, latency sum, cache hits) per breakdown axis. These
-             feed the trend charts, which never scan the raw tables.
+             errors, tokens, latency sum + histogram, cache hits) per breakdown
+             axis. These feed the trend charts, which never scan the raw tables.
   MongoDB    requests                            — the event's metrics merged into
              the request document, so the Requests screen has rows to list and a
              detail to open. The gateway writes the prompt/response bodies to the
@@ -34,6 +34,7 @@ import signal
 import sys
 import time
 import uuid
+from bisect import bisect_left
 from collections import defaultdict
 from datetime import date, datetime, timezone
 
@@ -65,7 +66,30 @@ REQUESTS_TTL_DAYS = int(os.environ.get("REQUESTS_TTL_DAYS", "30"))
 BATCH_SIZE = int(os.environ.get("INGEST_BATCH_SIZE", "500"))
 FLUSH_SECONDS = float(os.environ.get("INGEST_FLUSH_SECONDS", "5"))
 
+# --- Latency histogram ---
+# Upper bounds, in ms, of the rollup's latency buckets. These mirror the
+# rollup_hourly lat_le_* counter columns one for one and in order — the ladder
+# really lives in the column names, so re-cutting it is an ALTER TABLE, not just
+# an edit here. Not configurable for the same reason.
+#
+# The bounds span a cache hit (~1ms) to a slow completion (10s+). Anything past
+# the last bound is counted only by `requests`, which is the +Inf bucket: with
+# Prometheus `le` semantics every bucket counts the requests at or below its
+# bound, so the unbounded one is by definition just "all of them". See init.cql.
+LATENCY_BUCKETS_MS = (10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000)
+
 _running = True
+
+
+def bucket_index(latency_ms: int) -> int:
+    """Which histogram bucket a latency falls in.
+
+    bisect_left gives the first bound that is >= the latency, which is exactly
+    `le` semantics: 10ms belongs to lat_le_10, 11ms to lat_le_25. Anything past
+    the last bound returns len(LATENCY_BUCKETS_MS) — the overflow slot, which is
+    never written out (see _empty_bucket).
+    """
+    return bisect_left(LATENCY_BUCKETS_MS, latency_ms)
 
 
 def _stop(*_args) -> None:
@@ -105,6 +129,11 @@ def connect_mongo():
 
 
 def prepare(session: Session) -> dict[str, PreparedStatement]:
+    # Generated from the ladder rather than spelled out, so the statement and
+    # LATENCY_BUCKETS_MS cannot drift apart — a bucket added to one but not the
+    # other would silently mis-bind every counter after it.
+    hist_set = ", ".join(f"lat_le_{b} = lat_le_{b} + ?" for b in LATENCY_BUCKETS_MS)
+
     return {
         "by_model": session.prepare(
             "INSERT INTO metrics_by_model "
@@ -125,7 +154,9 @@ def prepare(session: Session) -> dict[str, PreparedStatement]:
             "cost_micros = cost_micros + ?, requests = requests + ?, "
             "errors = errors + ?, prompt_tokens = prompt_tokens + ?, "
             "completion_tokens = completion_tokens + ?, "
-            "latency_sum_ms = latency_sum_ms + ?, cache_hits = cache_hits + ? "
+            "latency_sum_ms = latency_sum_ms + ?, cache_hits = cache_hits + ?, "
+            "lat_count = lat_count + ?, "
+            f"{hist_set} "
             "WHERE project_id = ? AND dim = ? AND day = ? AND hour = ?"
         ),
         # Which models/keys were seen today. Rewriting the same row on every flush
@@ -164,6 +195,7 @@ def normalize(event: dict) -> dict:
     prompt_tokens = int(event.get("prompt_tokens") or 0)
     completion_tokens = int(event.get("completion_tokens") or 0)
     cost_usd = float(event.get("cost_usd") or 0.0)
+    latency_ms = int(event.get("latency_ms") or 0)
     status = event.get("status") or "unknown"
 
     return {
@@ -183,7 +215,11 @@ def normalize(event: dict) -> dict:
         "cost_usd": cost_usd,
         # Counters are integer-only; money rides as micro-dollars (see init.cql).
         "cost_micros": round(cost_usd * 1_000_000),
-        "latency_ms": int(event.get("latency_ms") or 0),
+        "latency_ms": latency_ms,
+        # Resolved once here rather than in the fold: the same event lands in
+        # three rollup dims, and the bucket it belongs to is the same all three
+        # times.
+        "lat_bucket": bucket_index(latency_ms),
         "ttfb_ms": event.get("ttfb_ms"),
         "status": status,
         # "cached" counts as a hit, not an error; anything not success/cached is an error.
@@ -228,7 +264,38 @@ def _empty_bucket() -> dict:
     return {
         "cost_micros": 0, "requests": 0, "errors": 0, "prompt_tokens": 0,
         "completion_tokens": 0, "latency_sum_ms": 0, "cache_hits": 0,
+        # Latency histogram, counted *disjointly* while folding: one increment
+        # per event, into the single bucket it belongs to. The columns want
+        # cumulative `le` counts, but deriving those here would mean touching
+        # every bucket at or above the event's — ten dict writes per event per
+        # dim instead of one, on the hottest loop in the worker. _cumulative_hist
+        # does it once per flush instead, which is the same answer for a fraction
+        # of the work (see the note there).
+        #
+        # One slot longer than the ladder: the tail slot absorbs latencies past
+        # the last bound, so the fold needs no bounds check. It is never written
+        # out — its bucket is +Inf, which is `requests`.
+        "hist": [0] * (len(LATENCY_BUCKETS_MS) + 1),
     }
+
+
+def _cumulative_hist(hist: list[int]) -> list[int]:
+    """Disjoint bucket counts -> the cumulative `le` deltas the columns take.
+
+    Safe because a counter UPDATE *adds* a delta, and cumulative counts are
+    additive: summing each flush's cumulative counts gives the same column value
+    as if every event had incremented every bucket at or above it. So the running
+    total can be built once per bucket here, at flush time, instead of once per
+    event in the fold.
+
+    Drops the overflow slot — see _empty_bucket.
+    """
+    out: list[int] = []
+    running = 0
+    for count in hist[: len(LATENCY_BUCKETS_MS)]:
+        running += count
+        out.append(running)
+    return out
 
 
 def flush(session, stmts, requests_coll, consumer, buffer: list[dict], reason: str) -> None:
@@ -268,6 +335,7 @@ def flush(session, stmts, requests_coll, consumer, buffer: list[dict], reason: s
             b["completion_tokens"] += e["completion_tokens"]
             b["latency_sum_ms"] += e["latency_ms"]
             b["cache_hits"] += 1 if e["cache_hit"] else 0
+            b["hist"][e["lat_bucket"]] += 1
 
         # 3. And note that those axes exist, so the dashboard can find them again
         #    without scanning anything (see dims_by_day in init.cql).
@@ -288,6 +356,10 @@ def flush(session, stmts, requests_coll, consumer, buffer: list[dict], reason: s
         session.execute_async(stmts["rollup"], (
             b["cost_micros"], b["requests"], b["errors"], b["prompt_tokens"],
             b["completion_tokens"], b["latency_sum_ms"], b["cache_hits"],
+            # sum(hist), not b["requests"] — the histogram's denominator has to be
+            # derived from the histogram. They are the same number here, but only
+            # here; see lat_count in init.cql.
+            sum(b["hist"]), *_cumulative_hist(b["hist"]),
             project_id, dim, day, hour,
         ))
         for (project_id, dim, day, hour), b in rollup.items()

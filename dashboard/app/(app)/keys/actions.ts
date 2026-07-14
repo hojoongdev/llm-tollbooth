@@ -2,6 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 
+import { invalidateGatewayKeys } from "@/lib/gateway";
 import { createKey, deleteKey, setKeyLimits, setKeyStatus, type KeyLimits } from "@/lib/keys";
 
 export interface NewKeyState {
@@ -33,19 +34,27 @@ export async function issueKey(_prev: NewKeyState, form: FormData): Promise<NewK
   return { key };
 }
 
+// Every one of these changes something the gateway is holding in its key cache —
+// the status it checks, the budget it enforces, the existence of the key at all —
+// so every one of them tells it to forget. Without that, the screen would say
+// "blocked" for up to 30 seconds before the gateway agreed.
+
 export async function toggleKey(form: FormData): Promise<void> {
   const id = String(form.get("id") ?? "");
   const blocked = String(form.get("status")) === "blocked";
   await setKeyStatus(id, blocked ? "active" : "blocked");
+  await invalidateGatewayKeys();
   revalidatePath("/keys");
 }
 
 export async function updateLimits(form: FormData): Promise<void> {
   await setKeyLimits(String(form.get("id") ?? ""), limitsFrom(form));
+  await invalidateGatewayKeys();
   revalidatePath("/keys");
 }
 
 export async function revokeKey(form: FormData): Promise<void> {
   await deleteKey(String(form.get("id") ?? ""));
+  await invalidateGatewayKeys();
   revalidatePath("/keys");
 }

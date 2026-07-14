@@ -9,6 +9,7 @@ import { initKeys } from "./keys.js";
 import { closeMongo, connectMongo } from "./mongo.js";
 import { initPricing } from "./pricing.js";
 import { initRequests } from "./requests.js";
+import { registerAdmin } from "./routes/admin.js";
 import { registerChat } from "./routes/chat.js";
 import { registerHealth } from "./routes/health.js";
 import { registerModels } from "./routes/models.js";
@@ -41,6 +42,7 @@ async function main(): Promise<void> {
   registerHealth(app);
   registerModels(app);
   registerChat(app);
+  registerAdmin(app);
 
   await app.listen({ port: PORT, host: HOST });
 }

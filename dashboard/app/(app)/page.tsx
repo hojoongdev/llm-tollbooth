@@ -1,5 +1,7 @@
+import { budgetBurn } from "@/lib/budget";
 import { modelBreakdown, readRollup } from "@/lib/cassandra";
 import { parseRange, windowFor, RANGE_LABEL_KO } from "@/lib/time";
+import { BudgetBurn } from "@/components/BudgetBurn";
 import { Cards } from "@/components/Cards";
 import { ModelBreakdown } from "@/components/ModelBreakdown";
 import { PageBody, PageHeader } from "@/components/page-header";
@@ -16,7 +18,14 @@ export default async function OverviewPage({
 }) {
   const range = parseRange((await searchParams).range);
   const w = windowFor(range);
-  const [overview, models] = await Promise.all([readRollup(w, "all"), modelBreakdown(w)]);
+  // budgetBurn takes no window, and that is not an oversight: a cap is a calendar thing.
+  // It always reads today and this month, in UTC, because that is what the gateway
+  // enforces against.
+  const [overview, models, burn] = await Promise.all([
+    readRollup(w, "all"),
+    modelBreakdown(w),
+    budgetBurn(),
+  ]);
 
   return (
     <>
@@ -34,6 +43,7 @@ export default async function OverviewPage({
           </CardContent>
         </Card>
         <ModelBreakdown rows={models} range={range} />
+        <BudgetBurn rows={burn} />
       </PageBody>
     </>
   );

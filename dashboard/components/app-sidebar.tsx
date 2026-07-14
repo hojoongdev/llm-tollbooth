@@ -1,7 +1,7 @@
 "use client";
 
 import { usePathname } from "next/navigation";
-import { CircleDollarSign, KeyRound, LayoutDashboard, LogOut, ScrollText, TrafficCone, type LucideIcon } from "lucide-react";
+import { BellRing, CircleDollarSign, KeyRound, LayoutDashboard, LogOut, ScrollText, TrafficCone, type LucideIcon } from "lucide-react";
 
 import { logout } from "@/app/login/actions";
 import { PROJECT } from "@/lib/config";
@@ -24,8 +24,8 @@ function SignOutButton() {
 
 type NavItem = { href: string; label: string; icon: LucideIcon };
 
-// Grouped by what you came here to do: watch what happened, or change what the
-// gateway will do next.
+// Grouped by what you came here to do: watch what happened, change what the gateway
+// will do next, or arrange to be told without having to watch at all.
 const NAV: { section: string; items: NavItem[] }[] = [
   {
     section: "Observability",
@@ -40,6 +40,10 @@ const NAV: { section: string; items: NavItem[] }[] = [
       { href: "/keys", label: "API Keys", icon: KeyRound },
       { href: "/pricing", label: "Pricing", icon: CircleDollarSign },
     ],
+  },
+  {
+    section: "Workflows",
+    items: [{ href: "/rules", label: "Rules", icon: BellRing }],
   },
 ];
 

@@ -1,7 +1,7 @@
 [project]
-name = "ingest-worker"
+name = "rules-worker"
 version = "0.1.0"
-description = "Kafka consumer that ingests LLM Tollbooth events"
+description = "Evaluates alert rules against the rollup and fires their actions"
 requires-python = ">=3.12"
 dependencies = [
     "confluent-kafka==2.6.1",
@@ -19,7 +19,5 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools]
 py-modules = ["main"]
 
-# The tests import `main` directly, so pytest has to be able to see it. It sits
-# at the package root rather than under a src/ layout, hence rootdir on the path.
 [tool.pytest.ini_options]
 pythonpath = ["."]

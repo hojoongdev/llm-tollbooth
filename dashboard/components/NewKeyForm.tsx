@@ -25,7 +25,7 @@ export function NewKeyForm() {
       </form>
 
       <p className="mt-2 text-[11px] text-muted-foreground">
-        빈 칸은 무제한입니다. 게이트웨이는 키 상태를 30초간 캐시하므로 변경이 반영되기까지 최대 30초 걸립니다.
+        빈 칸은 무제한입니다. 키를 차단·수정·폐기하면 게이트웨이 키 캐시를 즉시 비우므로 다음 호출부터 바로 반영됩니다.
       </p>
 
       {state.error ? <p className="mt-2 text-xs text-destructive">{state.error}</p> : null}

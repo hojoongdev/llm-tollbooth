@@ -159,6 +159,12 @@ services:
       # GATEWAY_DEFAULT_KEY pins that key so it survives a restart.
       AUTH_MODE: ${AUTH_MODE:-none}
       GATEWAY_DEFAULT_KEY: ${GATEWAY_DEFAULT_KEY:-}
+      # Shared secret for /internal — how the console and the rules worker tell the
+      # gateway to drop its key cache, so a block takes effect on the next call
+      # instead of within 30 seconds. Not a credential to anything: the one route it
+      # guards flushes a cache and reads nothing. Change it anyway if you publish the
+      # gateway's port; unset it and /internal simply isn't registered.
+      GATEWAY_INTERNAL_TOKEN: ${GATEWAY_INTERNAL_TOKEN:-local-dev-internal}
       # Real providers. A model whose provider has no key here is served by the
       # mock instead — which is why the stack works on a fresh clone, and why
       # switching to the real thing is one line in .env and nothing else.
@@ -221,6 +227,53 @@ services:
       MONGO_DB: tollbooth
     restart: unless-stopped
 
+  # Rules worker: the same llm.events stream, read again from its own consumer
+  # group, with its own offsets — the two workers cannot starve or block each
+  # other. It reads the stream to learn which scopes saw traffic, then asks the
+  # rollup whether any rule scoped to them has crossed a threshold (P4).
+  rules:
+    build: ./workers/rules
+    image: llm-tollbooth/rules
+    container_name: llm-tollbooth-rules
+    depends_on:
+      kafka:
+        condition: service_healthy
+      cassandra:
+        condition: service_healthy
+      cassandra-init:
+        condition: service_completed_successfully
+      mongodb:
+        condition: service_healthy
+      mailpit:
+        condition: service_healthy
+    environment:
+      KAFKA_BOOTSTRAP: kafka:29092
+      KAFKA_TOPIC: llm.events
+      KAFKA_GROUP_ID: rules
+      CASSANDRA_CONTACT_POINTS: cassandra
+      CASSANDRA_KEYSPACE: tollbooth
+      MONGO_URI: mongodb://mongodb:27017
+      MONGO_DB: tollbooth
+      PROJECT_ID: default
+      RULES_EVAL_SECONDS: ${RULES_EVAL_SECONDS:-20}
+      # Keyword rules read the request document, so they cost a Mongo read per call. This
+      # bounds that — but it defaults to reading everything, because a rule that samples a
+      # leak misses it most of the time while looking armed.
+      RULES_KEYWORD_SAMPLE_RATE: ${RULES_KEYWORD_SAMPLE_RATE:-1.0}
+      # Point at the bundled Mailpit by default, so email alerts work out of the box
+      # with no account, no credentials and nothing that could reach a real inbox.
+      # Override these for a real relay; SMTP_USER is what turns on STARTTLS.
+      SMTP_HOST: ${SMTP_HOST:-mailpit}
+      SMTP_PORT: ${SMTP_PORT:-1025}
+      SMTP_FROM: ${SMTP_FROM:-alerts@tollbooth.local}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      # So a `block` action takes effect on the gateway's next call rather than
+      # whenever its 30s key cache happens to expire.
+      GATEWAY_URL: http://gateway:8080
+      GATEWAY_INTERNAL_TOKEN: ${GATEWAY_INTERNAL_TOKEN:-local-dev-internal}
+    restart: unless-stopped
+
   # Console + read API. Server components read hourly rollups from Cassandra
   # (trends/cards) and request documents from MongoDB (log + detail). P2 ships
   # the Overview and Requests screens.
@@ -244,6 +297,11 @@ services:
       MONGO_URI: mongodb://mongodb:27017
       MONGO_DB: tollbooth
       PROJECT_ID: default
+      # Blocking or revoking a key from the console has to reach the gateway, which
+      # caches key state for 30s. Without these the button would be right and the
+      # gateway would be wrong, for half a minute.
+      GATEWAY_URL: http://gateway:8080
+      GATEWAY_INTERNAL_TOKEN: ${GATEWAY_INTERNAL_TOKEN:-local-dev-internal}
       # Console login (spec §6). Empty by default => open console; set AUTH_MODE=single
       # plus the three values below in .env to require a login. No code changes.
       AUTH_MODE: ${AUTH_MODE:-none}
