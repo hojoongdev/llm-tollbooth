@@ -44,19 +44,29 @@ services:
 
   # One-shot: waits for the broker, then creates the llm.events topic with 6
   # partitions (so consumers can scale out later) and exits. Safe to re-run.
+  # Creates both topics and exits. llm.events carries every gateway call (consumed
+  # by ingest and rules); llm.eval.tasks is P5's seam between the eval worker's
+  # sampler (which decides what to score) and its scorer (which calls the judge
+  # LLM) — a buffer so slow scoring never holds up sampling. Both 6 partitions,
+  # for the same parallel-consumer demo as llm.events.
   kafka-init:
     image: apache/kafka:3.9.0
     container_name: llm-tollbooth-kafka-init
     depends_on:
       kafka:
         condition: service_healthy
-    entrypoint: ["/opt/kafka/bin/kafka-topics.sh"]
-    command: >
-      --bootstrap-server kafka:29092
-      --create --if-not-exists
-      --topic llm.events
-      --partitions 6
-      --replication-factor 1
+    entrypoint: ["/bin/sh", "-c"]
+    # One list element = one argv string for `sh -c`, so the whole script stays a
+    # single argument. ($$ escapes compose's own interpolation -> a literal $ for
+    # the shell.) set -e so a failed create exits non-zero and compose reports it.
+    command:
+      - |
+        set -e
+        for topic in llm.events llm.eval.tasks; do
+          /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:29092 \
+            --create --if-not-exists --topic "$$topic" \
+            --partitions 6 --replication-factor 1
+        done
     restart: "no"
 
   # Time-series metrics store. Absorbs the write-heavy stream of per-request rows
