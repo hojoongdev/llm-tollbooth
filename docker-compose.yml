@@ -187,6 +187,9 @@ services:
       SELFHOST_BASE_URL: ${SELFHOST_BASE_URL:-}
       SELFHOST_API_KEY: ${SELFHOST_API_KEY:-}
       PROVIDER_TIMEOUT_MS: ${PROVIDER_TIMEOUT_MS:-60000}
+      # The model a failed call is retried on (P5). Empty = no fallback. A key can name
+      # its own in the console, which wins over this.
+      GATEWAY_FALLBACK_MODEL: ${GATEWAY_FALLBACK_MODEL:-}
       # Mock provider: the fake LLM that makes the stack demo-able with no real
       # API key. Zero *both* latency knobs to measure the gateway's own overhead —
       # leaving the jitter behind is measuring the jitter.
