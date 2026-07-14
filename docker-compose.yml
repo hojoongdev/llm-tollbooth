@@ -362,6 +362,14 @@ services:
       # gateway would be wrong, for half a minute.
       GATEWAY_URL: http://gateway:8080
       GATEWAY_INTERNAL_TOKEN: ${GATEWAY_INTERNAL_TOKEN:-local-dev-internal}
+      # Shown, not obeyed, on the Settings screen (spec §8 screen 6): these belong to the
+      # rules worker and the gateway, and the console reports what alerts and fallbacks will
+      # actually do. Reading them off the documented defaults instead would give a screen
+      # that is right until someone edits their .env, and then confidently wrong.
+      SMTP_HOST: ${SMTP_HOST:-mailpit}
+      SMTP_PORT: ${SMTP_PORT:-1025}
+      SMTP_FROM: ${SMTP_FROM:-alerts@tollbooth.local}
+      GATEWAY_FALLBACK_MODEL: ${GATEWAY_FALLBACK_MODEL:-}
       # Console login (spec §6). Empty by default => open console; set AUTH_MODE=single
       # plus the three values below in .env to require a login. No code changes.
       AUTH_MODE: ${AUTH_MODE:-none}

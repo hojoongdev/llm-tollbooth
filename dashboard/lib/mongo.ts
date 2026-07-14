@@ -84,11 +84,27 @@ export async function listRequests(f: RequestFilter): Promise<RequestRow[]> {
   return docs.map(toRow);
 }
 
+/** The eval worker's verdict on this call, embedded on the request (spec §4 group D). */
+export interface RequestEval {
+  overall: number;
+  relevance: number;
+  hallucinationRisk: number;
+  tone: number;
+  reason: string;
+  /** The judge model — not the model being judged. */
+  judge: string;
+  scoredAt: Date | null;
+}
+
 export interface RequestDetail extends RequestRow {
   /** The prompt, as sent. Null for synthetic loadgen events, which carry no bodies. */
   messages: Array<{ role: string; content: string }> | null;
   answer: string | null;
   error: string | null;
+  /** Null unless this call was sampled for evaluation — most are not. */
+  evaluation: RequestEval | null;
+  /** A non-error annotation, e.g. that the call fell back to another model. */
+  note: string | null;
 }
 
 /**
@@ -103,10 +119,25 @@ export async function getRequest(id: string): Promise<RequestDetail | null> {
   const doc = await db().collection("requests").findOne({ _id: id as never });
   if (!doc) return null;
 
+  const e = doc.eval;
   return {
     ...toRow(doc),
     messages: doc.request?.messages ?? null,
     answer: doc.response?.content ?? null,
     error: doc.error ?? null,
+    // A fourth writer on this document (gateway, ingest, rules, eval), and like the others
+    // it $sets one field nobody else touches.
+    evaluation: e
+      ? {
+          overall: Number(e.overall ?? 0),
+          relevance: Number(e.relevance ?? 0),
+          hallucinationRisk: Number(e.hallucination_risk ?? 0),
+          tone: Number(e.tone ?? 0),
+          reason: String(e.reason ?? ""),
+          judge: String(e.model ?? "—"),
+          scoredAt: e.scored_at ?? null,
+        }
+      : null,
+    note: doc.note ?? null,
   };
 }

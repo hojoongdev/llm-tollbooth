@@ -1,7 +1,7 @@
 "use client";
 
 import { usePathname } from "next/navigation";
-import { BellRing, CircleDollarSign, KeyRound, LayoutDashboard, LogOut, ScrollText, TrafficCone, type LucideIcon } from "lucide-react";
+import { BellRing, CircleDollarSign, KeyRound, LayoutDashboard, LogOut, ScrollText, SlidersHorizontal, Sparkles, TrafficCone, type LucideIcon } from "lucide-react";
 
 import { logout } from "@/app/login/actions";
 import { PROJECT } from "@/lib/config";
@@ -32,6 +32,9 @@ const NAV: { section: string; items: NavItem[] }[] = [
     items: [
       { href: "/", label: "Overview", icon: LayoutDashboard },
       { href: "/requests", label: "Requests", icon: ScrollText },
+      // Quality sits with the other things you come here to *watch*, not under Gateway:
+      // it describes what the calls were worth, not what the gateway will do next.
+      { href: "/quality", label: "Quality", icon: Sparkles },
     ],
   },
   {
@@ -44,6 +47,10 @@ const NAV: { section: string; items: NavItem[] }[] = [
   {
     section: "Workflows",
     items: [{ href: "/rules", label: "Rules", icon: BellRing }],
+  },
+  {
+    section: "Console",
+    items: [{ href: "/settings", label: "Settings", icon: SlidersHorizontal }],
   },
 ];
 
