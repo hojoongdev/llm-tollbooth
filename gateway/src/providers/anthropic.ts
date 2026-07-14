@@ -1,7 +1,21 @@
 import { randomUUID } from "node:crypto";
 
-import { callUpstream } from "./http.js";
-import type { ChatRequest, ChatResponse, Provider, ProviderResult } from "./types.js";
+import { deltaChunk, usageChunk } from "./chunks.js";
+import { callUpstream, openUpstreamStream, sseEvents } from "./http.js";
+import type {
+  ChatCompletionChunk,
+  ChatRequest,
+  ChatResponse,
+  Provider,
+  ProviderResult,
+} from "./types.js";
+
+/** The Anthropic stream frames we read; everything else (ping, block start/stop). */
+interface AnthropicStreamEvent {
+  message?: { usage?: { input_tokens?: number } };
+  delta?: { type?: string; text?: string; stop_reason?: string | null };
+  usage?: { output_tokens?: number };
+}
 
 /**
  * Anthropic's Messages API — the adapter that actually has to translate.
@@ -45,6 +59,57 @@ export class AnthropicProvider implements Provider {
     );
 
     return { response: fromAnthropicResponse(body, req.model), ttfbMs };
+  }
+
+  /**
+   * Anthropic's stream is the one that genuinely has to be rebuilt. It arrives as
+   * named events — message_start carries input_tokens, content_block_delta carries
+   * a text piece, message_delta carries the stop reason and output_tokens — and
+   * none of that is the OpenAI chunk shape. So we open with a role frame, turn each
+   * text delta into a content chunk, and close with the finish + a usage chunk
+   * assembled from the two token counts the stream reported along the way.
+   */
+  async *stream(req: ChatRequest): AsyncIterable<ChatCompletionChunk> {
+    const res = await openUpstreamStream(
+      `${this.baseUrl}/messages`,
+      { "x-api-key": this.apiKey, "anthropic-version": ANTHROPIC_VERSION },
+      { ...toAnthropicRequest(req), stream: true },
+    );
+
+    const id = `chatcmpl-${randomUUID()}`;
+    const created = Math.floor(Date.now() / 1000);
+    let inputTokens = 0;
+    let outputTokens = 0;
+    let stopReason: string | null = null;
+
+    yield deltaChunk(id, created, req.model, { role: "assistant" });
+
+    for await (const { event, data } of sseEvents(res)) {
+      let e: AnthropicStreamEvent;
+      try {
+        e = JSON.parse(data) as AnthropicStreamEvent;
+      } catch {
+        continue;
+      }
+
+      if (event === "message_start") {
+        inputTokens = e.message?.usage?.input_tokens ?? inputTokens;
+      } else if (event === "content_block_delta") {
+        if (e.delta?.type === "text_delta" && e.delta.text) {
+          yield deltaChunk(id, created, req.model, { content: e.delta.text });
+        }
+      } else if (event === "message_delta") {
+        stopReason = e.delta?.stop_reason ?? stopReason;
+        outputTokens = e.usage?.output_tokens ?? outputTokens;
+      }
+    }
+
+    yield deltaChunk(id, created, req.model, {}, finishReason(stopReason));
+    yield usageChunk(id, created, req.model, {
+      prompt_tokens: inputTokens,
+      completion_tokens: outputTokens,
+      total_tokens: inputTokens + outputTokens,
+    });
   }
 }
 

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { FastifyInstance, FastifyRequest } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 
 import { authenticate } from "../auth.js";
 import { checkLimits, recordSpend } from "../budget.js";
@@ -9,8 +9,9 @@ import type { LlmEvent } from "../event.js";
 import { publishEvent } from "../kafka.js";
 import { costOf } from "../pricing.js";
 import { resolveProvider } from "../providers/index.js";
-import type { ChatRequest } from "../providers/types.js";
+import type { ChatRequest, ChatResponse, Provider, Usage } from "../providers/types.js";
 import { storeRequest } from "../requests.js";
+import { estimateTokens } from "../tokens.js";
 
 const ENDPOINT = "/v1/chat/completions";
 
@@ -96,6 +97,14 @@ export function registerChat(app: FastifyInstance): void {
         );
     }
 
+    // Streaming takes its own path from here: the answer arrives in frames, so
+    // usage is summed as they pass rather than read off a finished response, and
+    // the response cache sits it out — it stores whole answers, and is off by
+    // default anyway. Everything above (auth, block, budget, rate) applies equally.
+    if (chat.stream) {
+      return streamCompletion(reply, provider, chat, key._id, eventId, startedAt, record);
+    }
+
     // Served from the cache, if we've answered this exact question before. It is
     // recorded like any other call — tokens and all — but at zero cost, because
     // nothing was bought. That is what makes the cache's value legible in the
@@ -168,15 +177,6 @@ function validate(body: Partial<ChatRequest> | undefined) {
   if (!Array.isArray(body.messages) || body.messages.length === 0) {
     return errorBody("'messages' must be a non-empty array.", "invalid_request_error", "missing_messages");
   }
-  if (body.stream) {
-    // Honest rather than silently non-streaming: usage accounting over a stream
-    // is its own problem, and it is scheduled for P5.
-    return errorBody(
-      "Streaming is not supported yet — send stream=false.",
-      "invalid_request_error",
-      "stream_unsupported",
-    );
-  }
   return null;
 }
 
@@ -189,4 +189,142 @@ function featureTag(req: FastifyRequest, chat: ChatRequest): string | null {
   const header = req.headers["x-tollbooth-tag"];
   const tag = (Array.isArray(header) ? header[0] : header) ?? chat.feature_tag;
   return tag?.trim() || null;
+}
+
+/**
+ * The streaming half of the toll booth. The same bookkeeping as above — publish an
+ * event, store the bodies, charge the budget — but the answer is forwarded frame by
+ * frame and usage is summed from those frames (or, when a provider sends no usage
+ * frame, counted from the text that went by).
+ *
+ * Headers are withheld until the first chunk on purpose. A provider that fails
+ * before it says anything — unreachable, or the mock's injected failure — still
+ * becomes a real HTTP error the client can read, because nothing has reached the
+ * wire yet. After the first byte a failure can only be reported in-band, and the
+ * stream closed.
+ */
+async function streamCompletion(
+  reply: FastifyReply,
+  provider: Provider,
+  chat: ChatRequest,
+  keyId: string,
+  eventId: string,
+  startedAt: number,
+  record: (patch: Partial<LlmEvent>) => void,
+): Promise<unknown> {
+  const raw = reply.raw;
+  let started = false;
+  let content = "";
+  let providerUsage: Usage | null = null;
+  let ttfbMs: number | null = null;
+  let finish = "stop";
+
+  const begin = (): void => {
+    started = true;
+    ttfbMs = Math.round(performance.now() - startedAt);
+    reply.hijack(); // we own the socket now; Fastify must not also try to answer
+    raw.writeHead(200, {
+      "content-type": "text/event-stream; charset=utf-8",
+      "cache-control": "no-cache, no-transform",
+      connection: "keep-alive",
+      "x-tollbooth-event-id": eventId,
+      "x-tollbooth-cache": "miss",
+    });
+  };
+
+  try {
+    for await (const chunk of provider.stream(chat)) {
+      if (!started) begin();
+      const choice = chunk.choices[0];
+      if (choice?.delta.content) content += choice.delta.content;
+      if (choice?.finish_reason) finish = choice.finish_reason;
+      if (chunk.usage) providerUsage = chunk.usage;
+      raw.write(`data: ${JSON.stringify(chunk)}\n\n`);
+    }
+  } catch (err) {
+    const failure =
+      err instanceof GatewayError
+        ? err
+        : new GatewayError("provider_error", err instanceof Error ? err.message : String(err));
+
+    if (!started) {
+      // Nothing on the wire yet — this can still be an ordinary error response.
+      record({ status: "error", error_type: failure.type });
+      storeRequest(eventId, chat, null, failure.message);
+      return reply.code(failure.status).send(errorBody(failure.message, "api_error", failure.type));
+    }
+
+    // Mid-stream: the caller already holds a 200 and a partial answer. Say so
+    // in-band, close, and record what did get through.
+    const usage = providerUsage ?? countUsage(chat, content);
+    record({
+      status: "error",
+      error_type: failure.type,
+      prompt_tokens: usage.prompt_tokens,
+      completion_tokens: usage.completion_tokens,
+      ttfb_ms: ttfbMs,
+    });
+    storeRequest(
+      eventId,
+      chat,
+      buildStreamResponse(eventId, chat.model, content, usage, finish),
+      `stream_interrupted: ${failure.message}`,
+    );
+    raw.write(`data: ${JSON.stringify(errorBody(failure.message, "api_error", failure.type))}\n\n`);
+    raw.end();
+    return undefined;
+  }
+
+  // A stream that produced no frames at all still owes the client a well-formed,
+  // empty SSE response rather than a hung socket.
+  if (!started) begin();
+  raw.write("data: [DONE]\n\n");
+  raw.end();
+
+  const usage = providerUsage ?? countUsage(chat, content);
+  const cost = await costOf(chat.model, usage);
+  record({
+    status: "success",
+    prompt_tokens: usage.prompt_tokens,
+    completion_tokens: usage.completion_tokens,
+    cost_usd: cost,
+    ttfb_ms: ttfbMs,
+  });
+  storeRequest(eventId, chat, buildStreamResponse(eventId, chat.model, content, usage, finish), null);
+  // Charge it now, not when the rollup catches up — the next call must see it spent.
+  recordSpend(keyId, cost);
+  return undefined;
+}
+
+/**
+ * Prompt tokens from the request, completion tokens from the streamed text — the
+ * fallback for a provider that sent no usage frame. It mirrors how the mock counts,
+ * so a streamed mock call bills identically to a buffered one.
+ */
+function countUsage(chat: ChatRequest, content: string): Usage {
+  const prompt = chat.messages.map((m) => m.content ?? "").join("\n");
+  const prompt_tokens = estimateTokens(prompt);
+  const completion_tokens = estimateTokens(content);
+  return { prompt_tokens, completion_tokens, total_tokens: prompt_tokens + completion_tokens };
+}
+
+/**
+ * Reassemble the streamed frames into the same ChatResponse shape the Requests
+ * detail already stores and shows, so a streamed call reads back like any other.
+ */
+function buildStreamResponse(
+  eventId: string,
+  model: string,
+  content: string,
+  usage: Usage,
+  finish_reason: string,
+): ChatResponse {
+  return {
+    id: `chatcmpl-${eventId}`,
+    object: "chat.completion",
+    created: Math.floor(Date.now() / 1000),
+    model,
+    choices: [{ index: 0, message: { role: "assistant", content }, finish_reason }],
+    usage,
+  };
 }

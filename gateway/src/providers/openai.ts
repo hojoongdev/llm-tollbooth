@@ -1,5 +1,11 @@
-import { callUpstream } from "./http.js";
-import type { ChatRequest, ChatResponse, Provider, ProviderResult } from "./types.js";
+import { callUpstream, openUpstreamStream, sseEvents } from "./http.js";
+import type {
+  ChatCompletionChunk,
+  ChatRequest,
+  ChatResponse,
+  Provider,
+  ProviderResult,
+} from "./types.js";
 
 /**
  * OpenAI, and anything that speaks its API — vLLM, Ollama, LM Studio, a hosted
@@ -32,10 +38,35 @@ export class OpenAICompatibleProvider implements Provider {
 
     return { response: body, ttfbMs };
   }
+
+  /**
+   * OpenAI's stream is already the wire shape we forward, so this adapter barely
+   * translates: it asks for usage on the stream (stream_options.include_usage,
+   * which puts a final usage frame on the wire) and passes each parsed chunk
+   * straight through. `[DONE]` is OpenAI's terminator, not a chunk, so it ends us.
+   */
+  async *stream(req: ChatRequest): AsyncIterable<ChatCompletionChunk> {
+    const res = await openUpstreamStream(
+      `${this.baseUrl}/chat/completions`,
+      this.apiKey ? { authorization: `Bearer ${this.apiKey}` } : {},
+      { ...toOpenAIRequest(req, true), stream_options: { include_usage: true } },
+    );
+
+    for await (const { data } of sseEvents(res)) {
+      if (data === "[DONE]") return;
+      let chunk: ChatCompletionChunk;
+      try {
+        chunk = JSON.parse(data) as ChatCompletionChunk;
+      } catch {
+        continue; // a keep-alive or a frame we don't recognise
+      }
+      yield chunk;
+    }
+  }
 }
 
 /** Pure, so the shape we actually put on the wire can be tested. */
-export function toOpenAIRequest(req: ChatRequest): Record<string, unknown> {
+export function toOpenAIRequest(req: ChatRequest, stream = false): Record<string, unknown> {
   return {
     model: req.model,
     messages: req.messages.map((m) => ({
@@ -47,7 +78,6 @@ export function toOpenAIRequest(req: ChatRequest): Record<string, unknown> {
     ...(req.top_p !== undefined && { top_p: req.top_p }),
     ...(req.max_tokens !== undefined && { max_tokens: req.max_tokens }),
     ...(req.stop !== undefined && { stop: req.stop }),
-    // Streaming is P5; asking for it here would get us a body we can't parse.
-    stream: false,
+    stream,
   };
 }
