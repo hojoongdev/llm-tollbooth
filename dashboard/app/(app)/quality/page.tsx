@@ -3,6 +3,7 @@ import Link from "next/link";
 import { modelBreakdown, readRollup } from "@/lib/cassandra";
 import { listScored, readEvalSettings } from "@/lib/eval";
 import { count, pct } from "@/lib/format";
+import { currentProject } from "@/lib/project";
 import { parseRange, windowFor, RANGE_LABEL_KO } from "@/lib/time";
 import { PageBody, PageHeader } from "@/components/page-header";
 import { QualityByModel } from "@/components/QualityByModel";
@@ -29,11 +30,12 @@ export default async function QualityPage({
 }) {
   const range = parseRange((await searchParams).range);
   const w = windowFor(range);
+  const { id: projectId } = await currentProject();
 
   const [overview, models, scored, settings] = await Promise.all([
-    readRollup(w, "all"),
-    modelBreakdown(w),
-    listScored(w.start),
+    readRollup(projectId, w, "all"),
+    modelBreakdown(projectId, w),
+    listScored(projectId, w.start),
     readEvalSettings(),
   ]);
 

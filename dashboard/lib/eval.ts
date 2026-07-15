@@ -99,9 +99,9 @@ export interface ScoredRow {
  * is bounded by the same retention as everything else. The window keeps it a small scan
  * rather than a growing one.
  */
-export async function listScored(since: Date, limit = 20): Promise<ScoredRow[]> {
+export async function listScored(projectId: string, since: Date, limit = 20): Promise<ScoredRow[]> {
   const docs = await requests()
-    .find({ ts: { $gte: since }, "eval.overall": { $exists: true } })
+    .find({ project_id: projectId, ts: { $gte: since }, "eval.overall": { $exists: true } })
     .sort({ "eval.overall": 1, ts: -1 })
     .limit(limit)
     .toArray();

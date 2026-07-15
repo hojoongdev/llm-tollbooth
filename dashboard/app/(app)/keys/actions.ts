@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 
 import { invalidateGatewayKeys } from "@/lib/gateway";
 import { createKey, deleteKey, setKeyLimits, setKeyStatus, type KeyLimits } from "@/lib/keys";
+import { currentProject } from "@/lib/project";
 
 export interface NewKeyState {
   /** The raw key, returned exactly once — the screen shows it and forgets it. */
@@ -29,7 +30,8 @@ export async function issueKey(_prev: NewKeyState, form: FormData): Promise<NewK
   const name = String(form.get("name") ?? "").trim();
   if (!name) return { error: "Name the key — it's the only way to tell it apart later." };
 
-  const key = await createKey(name, limitsFrom(form));
+  const { id: projectId } = await currentProject();
+  const key = await createKey(projectId, name, limitsFrom(form));
   revalidatePath("/keys");
   return { key };
 }
@@ -40,21 +42,24 @@ export async function issueKey(_prev: NewKeyState, form: FormData): Promise<NewK
 // "blocked" for up to 30 seconds before the gateway agreed.
 
 export async function toggleKey(form: FormData): Promise<void> {
+  const { id: projectId } = await currentProject();
   const id = String(form.get("id") ?? "");
   const blocked = String(form.get("status")) === "blocked";
-  await setKeyStatus(id, blocked ? "active" : "blocked");
+  await setKeyStatus(projectId, id, blocked ? "active" : "blocked");
   await invalidateGatewayKeys();
   revalidatePath("/keys");
 }
 
 export async function updateLimits(form: FormData): Promise<void> {
-  await setKeyLimits(String(form.get("id") ?? ""), limitsFrom(form));
+  const { id: projectId } = await currentProject();
+  await setKeyLimits(projectId, String(form.get("id") ?? ""), limitsFrom(form));
   await invalidateGatewayKeys();
   revalidatePath("/keys");
 }
 
 export async function revokeKey(form: FormData): Promise<void> {
-  await deleteKey(String(form.get("id") ?? ""));
+  const { id: projectId } = await currentProject();
+  await deleteKey(projectId, String(form.get("id") ?? ""));
   await invalidateGatewayKeys();
   revalidatePath("/keys");
 }

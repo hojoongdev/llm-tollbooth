@@ -13,6 +13,7 @@ import {
   type Metric,
   type RuleAction,
 } from "@/lib/rule-format";
+import { currentProject } from "@/lib/project";
 import { armRule, createRule, deleteRule, setRuleEnabled, setRuleTuning, type NewRule } from "@/lib/rules";
 
 export interface NewRuleState {
@@ -145,7 +146,8 @@ export async function addRule(_prev: NewRuleState, form: FormData): Promise<NewR
   // again for a while"; the worker wants seconds.
   const cooldownMinutes = Math.max(0, num(form, "cooldown_minutes", 30));
 
-  await createRule({
+  const { id: projectId } = await currentProject();
+  await createRule(projectId, {
     name,
     scope,
     kind,
@@ -159,15 +161,18 @@ export async function addRule(_prev: NewRuleState, form: FormData): Promise<NewR
 }
 
 export async function toggleRule(form: FormData): Promise<void> {
+  const { id: projectId } = await currentProject();
   const id = String(form.get("id") ?? "");
-  await setRuleEnabled(id, String(form.get("enabled")) !== "true");
+  await setRuleEnabled(projectId, id, String(form.get("enabled")) !== "true");
   revalidatePath("/rules");
 }
 
 export async function tuneRule(form: FormData): Promise<void> {
+  const { id: projectId } = await currentProject();
   const id = String(form.get("id") ?? "");
   const kind = oneOf<ConditionKind>(CONDITIONS, form.get("kind"), "metric_threshold");
   await setRuleTuning(
+    projectId,
     id,
     kind,
     num(form, "value", 0),
@@ -177,11 +182,13 @@ export async function tuneRule(form: FormData): Promise<void> {
 }
 
 export async function rearmRule(form: FormData): Promise<void> {
-  await armRule(String(form.get("id") ?? ""));
+  const { id: projectId } = await currentProject();
+  await armRule(projectId, String(form.get("id") ?? ""));
   revalidatePath("/rules");
 }
 
 export async function removeRule(form: FormData): Promise<void> {
-  await deleteRule(String(form.get("id") ?? ""));
+  const { id: projectId } = await currentProject();
+  await deleteRule(projectId, String(form.get("id") ?? ""));
   revalidatePath("/rules");
 }

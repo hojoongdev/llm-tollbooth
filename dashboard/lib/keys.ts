@@ -1,7 +1,6 @@
 import "server-only";
 import { createHash, randomBytes } from "node:crypto";
 
-import { PROJECT } from "./config";
 import { db } from "./mongo";
 
 /**
@@ -49,8 +48,8 @@ function toRow(d: Record<string, any>): KeyRow {
   };
 }
 
-export async function listKeys(): Promise<KeyRow[]> {
-  const docs = await keys().find({ project_id: PROJECT }).sort({ created_at: -1 }).toArray();
+export async function listKeys(projectId: string): Promise<KeyRow[]> {
+  const docs = await keys().find({ project_id: projectId }).sort({ created_at: -1 }).toArray();
   return docs.map(toRow);
 }
 
@@ -59,12 +58,12 @@ export async function listKeys(): Promise<KeyRow[]> {
  * store is its hash, so a key that isn't copied off this screen is gone, and
  * "show me the key again" is a question nobody here can answer.
  */
-export async function createKey(name: string, limits: KeyLimits): Promise<string> {
+export async function createKey(projectId: string, name: string, limits: KeyLimits): Promise<string> {
   const raw = generateKey();
   await keys().insertOne({
     _id: `key_${randomBytes(4).toString("hex")}` as never,
     name: name || "unnamed key",
-    project_id: PROJECT,
+    project_id: projectId,
     key_hash: hashKey(raw),
     // Enough to recognise the key in this table, not enough to use it.
     key_prefix: raw.slice(0, 12),
@@ -76,13 +75,16 @@ export async function createKey(name: string, limits: KeyLimits): Promise<string
   return raw;
 }
 
-export async function setKeyStatus(id: string, status: "active" | "blocked"): Promise<void> {
-  await keys().updateOne({ _id: id as never }, { $set: { status } });
+// The mutations scope by project_id as well as _id — belt to the console's braces.
+// The id only ever comes from a list this project already filtered, but a filter that
+// includes the tenant means a forged id cannot touch another project's key even so.
+export async function setKeyStatus(projectId: string, id: string, status: "active" | "blocked"): Promise<void> {
+  await keys().updateOne({ _id: id as never, project_id: projectId }, { $set: { status } });
 }
 
-export async function setKeyLimits(id: string, limits: KeyLimits): Promise<void> {
+export async function setKeyLimits(projectId: string, id: string, limits: KeyLimits): Promise<void> {
   await keys().updateOne(
-    { _id: id as never },
+    { _id: id as never, project_id: projectId },
     {
       $set: {
         "budget.daily_usd": limits.dailyUsd,
@@ -94,6 +96,6 @@ export async function setKeyLimits(id: string, limits: KeyLimits): Promise<void>
 }
 
 /** Revoking deletes the row: there is nothing to keep, since we never had the key. */
-export async function deleteKey(id: string): Promise<void> {
-  await keys().deleteOne({ _id: id as never });
+export async function deleteKey(projectId: string, id: string): Promise<void> {
+  await keys().deleteOne({ _id: id as never, project_id: projectId });
 }

@@ -1,4 +1,5 @@
 import { listKeys } from "@/lib/keys";
+import { currentProject } from "@/lib/project";
 import { KeysTable } from "@/components/KeysTable";
 import { NewKeyForm } from "@/components/NewKeyForm";
 import { PageBody, PageHeader } from "@/components/page-header";
@@ -7,7 +8,8 @@ import { Card } from "@/components/ui/card";
 export const dynamic = "force-dynamic";
 
 export default async function KeysPage() {
-  const keys = await listKeys();
+  const { id: projectId } = await currentProject();
+  const keys = await listKeys(projectId);
 
   return (
     <>

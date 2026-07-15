@@ -1,4 +1,5 @@
 import { listRequests } from "@/lib/mongo";
+import { currentProject } from "@/lib/project";
 import { parseRange, windowFor, RANGE_LABEL_KO } from "@/lib/time";
 import { Filters } from "@/components/Filters";
 import { PageBody, PageHeader } from "@/components/page-header";
@@ -18,7 +19,8 @@ export default async function RequestsPage({
   const sp = await searchParams;
   const range = parseRange(sp.range);
   const w = windowFor(range);
-  const rows = await listRequests({ window: w, model: sp.model, status: sp.status, limit: LIMIT });
+  const { id: projectId } = await currentProject();
+  const rows = await listRequests({ projectId, window: w, model: sp.model, status: sp.status, limit: LIMIT });
 
   return (
     <>

@@ -1,5 +1,6 @@
 import { modelsInWindow } from "@/lib/cassandra";
 import { listKeys } from "@/lib/keys";
+import { currentProject } from "@/lib/project";
 import { listFirings, listRules } from "@/lib/rules";
 import { windowFor } from "@/lib/time";
 import { FiringHistory } from "@/components/FiringHistory";
@@ -14,11 +15,12 @@ export default async function RulesPage() {
   // The scope select can only offer dims that exist. A model nobody has called has no
   // rollup partition, so a rule scoped to it would be a rule that can never fire — 30d
   // is wide enough to include a model that went quiet without dropping it entirely.
+  const { id: projectId } = await currentProject();
   const [rules, firings, keys, models] = await Promise.all([
-    listRules(),
-    listFirings(),
-    listKeys(),
-    modelsInWindow(windowFor("30d")),
+    listRules(projectId),
+    listFirings(projectId),
+    listKeys(projectId),
+    modelsInWindow(projectId, windowFor("30d")),
   ]);
 
   return (
