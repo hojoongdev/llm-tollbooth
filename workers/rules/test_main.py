@@ -29,6 +29,8 @@ from main import (
     metric_value,
     percentile,
     prompt_text,
+    report_body,
+    report_subject,
     response_text,
     scope_query,
     trigger_text,
@@ -463,6 +465,44 @@ def test_an_unknown_scope_is_refused_rather_than_matching_everything():
     # far more than the rule asked for.
     with pytest.raises(ValueError, match="unknown scope"):
         scope_query("prj_a", "feature:checkout", START, NOW)
+
+
+# --------------------------------------------------------------------------- #
+# Weekly report (P6) — the pure summary builders
+# --------------------------------------------------------------------------- #
+WEEK_START = datetime(2026, 7, 8, 0, 0, tzinfo=timezone.utc)
+WEEK_END = datetime(2026, 7, 15, 0, 0, tzinfo=timezone.utc)
+
+
+def test_report_subject_names_the_project():
+    assert report_subject("acme-staging") == "[tollbooth] Weekly usage — acme-staging"
+
+
+def test_report_body_summarises_the_week():
+    w = Window(cost=4.2718, requests=1500, errors=30, tokens=91234, latency_p95=812.0)
+    body = report_body("acme-staging", w, WEEK_START, WEEK_END)
+    assert "Weekly usage for acme-staging" in body
+    assert "2026-07-08 — 2026-07-15 (UTC)" in body
+    assert "1,500" in body          # requests, grouped
+    assert "2.0%" in body           # error rate 30/1500
+    assert "$4.2718" in body        # cost to the sub-cent
+    assert "812 ms" in body
+
+
+def test_report_omits_quality_when_nothing_was_scored():
+    # eval samples; a week with no scored calls has no average, and printing 0.0 would call
+    # a working project a failing one — the same absence-is-not-zero rule the UI follows.
+    w = Window(cost=1.0, requests=100, errors=0, tokens=1000, latency_p95=200.0)
+    assert "no calls scored" in report_body("p", w, WEEK_START, WEEK_END)
+    assert "/ 5" not in report_body("p", w, WEEK_START, WEEK_END)
+
+
+def test_report_shows_quality_when_there_is_some():
+    w = Window(cost=1.0, requests=100, errors=0, tokens=1000, latency_p95=200.0,
+               quality_sum=380 * 12, quality_count=12)
+    body = report_body("p", w, WEEK_START, WEEK_END)
+    assert "3.80 / 5" in body
+    assert "12 scored" in body
 
 
 # --------------------------------------------------------------------------- #

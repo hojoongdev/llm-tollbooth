@@ -153,6 +153,15 @@ ACTIONS = ("email", "webhook", "block", "tag")
 # stop believing the alert. A rule can raise or lower its own floor; this is the default.
 MIN_QUALITY_SAMPLES = int(os.environ.get("RULES_MIN_QUALITY_SAMPLES", "5"))
 
+# --- Weekly usage report (P6, spec §4 group E) ---
+# A per-project summary emailed to its owners, reusing the SMTP path the alert action uses.
+# Only meaningful in multi mode, where projects and accounts exist — in none/single there
+# are no project documents, so it is a no-op. The interval is how much time must pass before
+# a project is reported on again (a week), and the check cadence is how often that is tested.
+REPORT_ENABLED = os.environ.get("RULES_REPORT_ENABLED", "true").lower() in ("1", "true", "yes")
+REPORT_INTERVAL_SECONDS = float(os.environ.get("RULES_REPORT_INTERVAL_SECONDS", str(7 * 24 * 3600)))
+REPORT_CHECK_SECONDS = float(os.environ.get("RULES_REPORT_CHECK_SECONDS", "3600"))
+
 _running = True
 
 
@@ -195,6 +204,11 @@ class Store:
     firings: object
     api_keys: object
     requests: object
+    # Read for the weekly report (P6): which projects exist, who owns each, their emails.
+    projects: object
+    memberships: object
+    users: object
+    report_state: object
 
 
 def connect_mongo() -> Store:
@@ -206,6 +220,10 @@ def connect_mongo() -> Store:
         firings=db["rule_firings"],
         api_keys=db["api_keys"],
         requests=db["requests"],
+        projects=db["projects"],
+        memberships=db["memberships"],
+        users=db["users"],
+        report_state=db["report_state"],
     )
     # Idempotent, and created here rather than in a seed script for the same reason
     # every other index in this project is (see gateway/src/keys.ts): the service that
@@ -702,23 +720,122 @@ def email_body(rule: dict, firing: dict) -> str:
     return "\n".join(lines)
 
 
-def act_email(rule: dict, firing: dict, action: dict) -> str:
-    to = str(action.get("to") or "").strip()
-    if not to:
-        raise ValueError("email action has no recipient")
-
+def send_email(to: str, subject: str, body: str) -> None:
+    """The one place mail leaves the worker. Both a rule's email action and the weekly
+    report go through here, so they share the same SMTP settings, the same STARTTLS
+    switch (SMTP_USER), and the same bundled-Mailpit default (spec §4 group C, group E)."""
     msg = EmailMessage()
-    msg["Subject"] = f"[tollbooth] {rule.get('name') or rule['_id']}"
+    msg["Subject"] = subject
     msg["From"] = SMTP_FROM
     msg["To"] = to
-    msg.set_content(email_body(rule, firing))
+    msg.set_content(body)
 
     with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=ACTION_TIMEOUT) as smtp:
         if SMTP_USER:
             smtp.starttls()
             smtp.login(SMTP_USER, SMTP_PASSWORD)
         smtp.send_message(msg)
+
+
+def act_email(rule: dict, firing: dict, action: dict) -> str:
+    to = str(action.get("to") or "").strip()
+    if not to:
+        raise ValueError("email action has no recipient")
+
+    send_email(to, f"[tollbooth] {rule.get('name') or rule['_id']}", email_body(rule, firing))
     return f"sent to {to}"
+
+
+# --------------------------------------------------------------------------- #
+# Weekly usage report (P6) — a per-project summary, emailed to its owners
+# --------------------------------------------------------------------------- #
+def report_subject(project_name: str) -> str:
+    return f"[tollbooth] Weekly usage — {project_name}"
+
+
+def report_body(project_name: str, w: Window, start: datetime, end: datetime) -> str:
+    """The week in one screen, pure so §14 can test it without a broker or a clock.
+
+    Reads a Window — the same object the rule conditions judge — so the report and an
+    alert about the same project cannot disagree about what the week's cost was. Quality
+    prints only when something was scored: eval samples, so a week with no scored calls
+    has no average, and printing 0.0 would report a working project as a failing one, the
+    same lie the Quality screen refuses to tell.
+    """
+    lines = [
+        f"Weekly usage for {project_name}",
+        f"{start:%Y-%m-%d} — {end:%Y-%m-%d} (UTC)",
+        "",
+        f"  requests    {w.requests:,}",
+        f"  errors      {w.errors:,} ({w.error_rate * 100:.1f}%)",
+        f"  cost        ${w.cost:.4f}",
+        f"  tokens      {w.tokens:,}",
+        f"  latency p95 {w.latency_p95:.0f} ms",
+    ]
+    if w.quality_count:
+        lines.append(f"  avg quality {w.quality:.2f} / 5  ({w.quality_count} scored)")
+    else:
+        lines.append("  avg quality —  (no calls scored this week)")
+    lines += ["", "You are receiving this as an owner of the project.", ""]
+    return "\n".join(lines)
+
+
+def project_owner_emails(store: Store, project_id: str) -> list[str]:
+    """The addresses a project's report goes to: its owners. A usage/billing summary is an
+    administrator's concern, so members don't get it — owners do."""
+    owner_ids = [m["user_id"] for m in store.memberships.find({"project_id": project_id, "role": "owner"})]
+    if not owner_ids:
+        return []
+    return [
+        u["email"]
+        for u in store.users.find({"_id": {"$in": owner_ids}}, {"email": 1})
+        if u.get("email")
+    ]
+
+
+def send_weekly_reports(session, stmts, bounds, store: Store, now: datetime) -> int:
+    """Once a week, mail every project's owners a summary of the week. Returns how many
+    messages went out (0 when not due, or in none/single mode where no projects exist).
+
+    Due-ness is a single durable timestamp in report_state, not a timer in memory: a worker
+    that restarted daily must not mail a fresh 'weekly' report each morning. On a brand-new
+    volume last_sent is unset and the first check simply establishes the cadence.
+    """
+    if not REPORT_ENABLED:
+        return 0
+
+    state = store.report_state.find_one({"_id": "weekly"}) or {}
+    last = state.get("last_sent_at")
+    if last is not None:
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        if (now - last).total_seconds() < REPORT_INTERVAL_SECONDS:
+            return 0
+
+    hours = max(1, int(REPORT_INTERVAL_SECONDS // 3600))
+    start = now - timedelta(hours=hours)
+    sent = 0
+    for proj in store.projects.find({}):
+        pid = str(proj["_id"])
+        recipients = project_owner_emails(store, pid)
+        if not recipients:
+            continue
+        window = read_window(session, stmts, bounds, pid, "all", hours, now)
+        subject = report_subject(proj.get("name") or pid)
+        body = report_body(proj.get("name") or pid, window, start, now)
+        for to in recipients:
+            try:
+                send_email(to, subject, body)
+                sent += 1
+            except Exception as exc:  # noqa: BLE001 — one bad address must not stop the rest
+                print(f"rules: weekly report to {to} failed: {exc}", file=sys.stderr, flush=True)
+
+    # Record the cadence even if nothing was sent (no projects / no owners), so a fresh
+    # volume doesn't re-attempt every check.
+    store.report_state.update_one({"_id": "weekly"}, {"$set": {"last_sent_at": now}}, upsert=True)
+    if sent:
+        print(f"rules: weekly usage reports sent to {sent} recipient(s)", flush=True)
+    return sent
 
 
 def webhook_payload(rule: dict, firing: dict) -> dict:
@@ -1146,6 +1263,10 @@ def main() -> None:
     watching_quality = watch_quality(store)
     pending = 0
     last_eval = time.monotonic()
+    # The weekly report rides the same loop, checked on its own slow cadence. Due-ness is a
+    # durable timestamp in Mongo (see send_weekly_reports), so this timer only decides how
+    # often to *ask*, not when a report is actually due — a restart cannot re-send one.
+    last_report_check = 0.0
 
     try:
         while _running:
@@ -1163,6 +1284,13 @@ def main() -> None:
                         check_keywords(store, keyword_rules, event)
                     except (ValueError, TypeError) as exc:
                         print(f"rules: skipping bad message: {exc}", file=sys.stderr, flush=True)
+
+            if REPORT_ENABLED and (time.monotonic() - last_report_check) >= REPORT_CHECK_SECONDS:
+                try:
+                    send_weekly_reports(session, stmts, bounds, store, datetime.now(timezone.utc))
+                except Exception as exc:  # noqa: BLE001 — a report failure must not stop alerting
+                    print(f"rules: weekly report check failed: {exc}", file=sys.stderr, flush=True)
+                last_report_check = time.monotonic()
 
             if (time.monotonic() - last_eval) < EVAL_SECONDS:
                 continue

@@ -285,6 +285,11 @@ services:
       # whenever its 30s key cache happens to expire.
       GATEWAY_URL: http://gateway:8080
       GATEWAY_INTERNAL_TOKEN: ${GATEWAY_INTERNAL_TOKEN:-local-dev-internal}
+      # Weekly usage report (P6): a per-project summary emailed to its owners, through the
+      # same Mailpit as the alerts. Only does anything in multi mode, where projects and
+      # accounts exist. Turn it off, or shorten the interval to watch it fire in a demo.
+      RULES_REPORT_ENABLED: ${RULES_REPORT_ENABLED:-true}
+      RULES_REPORT_INTERVAL_SECONDS: ${RULES_REPORT_INTERVAL_SECONDS:-604800}
     restart: unless-stopped
 
   # Eval worker: samples calls and scores their quality with a judge LLM (P5).
