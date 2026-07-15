@@ -2,14 +2,14 @@ import { TrafficCone } from "lucide-react";
 import { redirect } from "next/navigation";
 
 import { AUTH_MODE } from "@/lib/auth";
-import { LoginForm } from "./login-form";
-import { MultiLoginForm } from "./multi-login-form";
+import { SignupForm } from "./signup-form";
 
 export const dynamic = "force-dynamic";
 
-export default function LoginPage() {
-  // Nothing to log into when the console is open.
-  if (AUTH_MODE === "none") redirect("/");
+export default function SignupPage() {
+  // Sign-up only exists in multi mode — none has no accounts, single has exactly one
+  // and it comes from env, not a form.
+  if (AUTH_MODE !== "multi") redirect("/login");
 
   return (
     <div className="flex min-h-svh items-center justify-center p-6">
@@ -21,11 +21,9 @@ export default function LoginPage() {
             <span className="text-[10px] uppercase tracking-wider text-muted-foreground">console</span>
           </div>
         </div>
-        <h1 className="text-base font-semibold tracking-tight">Sign in</h1>
-        <p className="mb-4 mt-0.5 text-xs text-muted-foreground">
-          {AUTH_MODE === "multi" ? "계정으로 로그인하세요." : "이 콘솔은 로그인이 필요합니다."}
-        </p>
-        {AUTH_MODE === "multi" ? <MultiLoginForm /> : <LoginForm />}
+        <h1 className="text-base font-semibold tracking-tight">Create your account</h1>
+        <p className="mb-4 mt-0.5 text-xs text-muted-foreground">가입하면 첫 프로젝트가 함께 만들어집니다.</p>
+        <SignupForm />
       </div>
     </div>
   );

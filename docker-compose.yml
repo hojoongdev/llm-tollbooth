@@ -370,13 +370,22 @@ services:
       SMTP_PORT: ${SMTP_PORT:-1025}
       SMTP_FROM: ${SMTP_FROM:-alerts@tollbooth.local}
       GATEWAY_FALLBACK_MODEL: ${GATEWAY_FALLBACK_MODEL:-}
-      # Console login (spec §6). Empty by default => open console; set AUTH_MODE=single
-      # plus the three values below in .env to require a login. No code changes.
+      # Console login (spec §6). Empty by default => open console.
+      #   single: one env credential + the three values below (P2's HMAC session)
+      #   multi:  real accounts/projects/roles (NextAuth). Needs AUTH_SECRET.
+      # No code changes — just the mode and its values.
       AUTH_MODE: ${AUTH_MODE:-none}
       ADMIN_EMAIL: ${ADMIN_EMAIL:-}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
       SESSION_SECRET: ${SESSION_SECRET:-}
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      # NextAuth's JWT signing secret (multi mode). Defaulted so `docker compose up`
+      # works out of the box for a local demo; set a real one for anything exposed —
+      # it is what every session token is signed with.
+      AUTH_SECRET: ${AUTH_SECRET:-local-dev-nextauth-secret-change-me}
+      # NextAuth infers its own URL from the request; on plain HTTP behind no proxy it
+      # needs to be told the origin is trusted (authConfig sets trustHost too).
+      AUTH_TRUST_HOST: "true"
     restart: unless-stopped
 
   # Synthetic traffic generator. Not a long-running service — run on demand:
