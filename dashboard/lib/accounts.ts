@@ -173,18 +173,21 @@ export async function createProject(ownerId: string, name: string): Promise<Proj
 /** The projects a user belongs to, with their role in each — the switcher's list,
  *  and the set every isolation check validates against. */
 export async function membershipsOf(userId: string): Promise<Membership[]> {
-  const rows = await memberships().find({ user_id: userId }).toArray();
+  // Oldest membership first, and that ordering is load-bearing: currentProject() lands a
+  // user in memberships[0] when they have no explicit selection, and "the project you have
+  // been in longest" is your own — the one signup made for you. Sorting by name instead
+  // would drop you into whichever teammate's project happens to sort first, so you'd log
+  // in looking at someone else's data before your own.
+  const rows = await memberships().find({ user_id: userId }).sort({ created_at: 1 }).toArray();
   if (rows.length === 0) return [];
   const byId = new Map(rows.map((r) => [String(r.project_id), r]));
   const projDocs = await projects().find({ _id: { $in: [...byId.keys()] as never[] } }).toArray();
   const names = new Map(projDocs.map((p) => [String(p._id), p.name as string]));
-  return rows
-    .map((r) => ({
-      projectId: String(r.project_id),
-      projectName: names.get(String(r.project_id)) ?? "(deleted project)",
-      role: (r.role === "owner" ? "owner" : "member") as Role,
-    }))
-    .sort((a, b) => a.projectName.localeCompare(b.projectName));
+  return rows.map((r) => ({
+    projectId: String(r.project_id),
+    projectName: names.get(String(r.project_id)) ?? "(deleted project)",
+    role: (r.role === "owner" ? "owner" : "member") as Role,
+  }));
 }
 
 /**
@@ -212,5 +215,62 @@ export async function projectMembers(projectId: string): Promise<Array<User & { 
       const u = byId.get(String(r.user_id));
       return u ? { ...u, role: (r.role === "owner" ? "owner" : "member") as Role } : null;
     })
-    .filter((x): x is User & { role: Role } => x !== null);
+    .filter((x): x is User & { role: Role } => x !== null)
+    .sort((a, b) => (a.role === b.role ? a.name.localeCompare(b.name) : a.role === "owner" ? -1 : 1));
+}
+
+// --------------------------------------------------------------------------- //
+// Membership mutations (owner-only at the call sites; guarded here regardless)
+// --------------------------------------------------------------------------- //
+// "Invite" here means adding an *already registered* user by email. A self-hosted
+// console has no mail to send an invite link through — that would be a token flow and
+// an SMTP dependency — so the pragmatic shape is: they sign up, an owner adds them.
+
+async function ownerCount(projectId: string): Promise<number> {
+  return memberships().countDocuments({ project_id: projectId, role: "owner" });
+}
+
+/** Add a registered user to a project. Returns the user added, or throws a message the
+ *  form can show (no such user, already a member). */
+export async function addMemberByEmail(projectId: string, email: string, role: Role): Promise<User> {
+  const user = await users().findOne({ email: email.toLowerCase().trim() });
+  if (!user) throw new Error("No account with that email — they need to sign up first.");
+
+  const existing = await memberships().findOne({ user_id: String(user._id), project_id: projectId });
+  if (existing) throw new Error("They are already a member of this project.");
+
+  await memberships().insertOne({
+    _id: randomUUID() as never,
+    user_id: String(user._id),
+    project_id: projectId,
+    role,
+    created_at: new Date(),
+  });
+  return toUser(user);
+}
+
+/**
+ * Change a member's role — but never leave a project with no owner. A project whose
+ * last owner demoted themselves is a project nobody can administer, including undoing
+ * the demotion. So the last owner cannot step down; they hand it over first.
+ */
+export async function setMemberRole(projectId: string, userId: string, role: Role): Promise<void> {
+  if (role === "member") {
+    const current = await memberships().findOne({ project_id: projectId, user_id: userId });
+    if (current?.role === "owner" && (await ownerCount(projectId)) <= 1) {
+      throw new Error("This is the project's only owner — make someone else an owner first.");
+    }
+  }
+  await memberships().updateOne({ project_id: projectId, user_id: userId }, { $set: { role } });
+}
+
+/** Remove a member. The last owner cannot be removed, for the same reason they cannot
+ *  be demoted — it would orphan the project. */
+export async function removeMember(projectId: string, userId: string): Promise<void> {
+  const current = await memberships().findOne({ project_id: projectId, user_id: userId });
+  if (!current) return;
+  if (current.role === "owner" && (await ownerCount(projectId)) <= 1) {
+    throw new Error("This is the project's only owner — hand ownership over before removing them.");
+  }
+  await memberships().deleteOne({ project_id: projectId, user_id: userId });
 }

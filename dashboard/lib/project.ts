@@ -68,3 +68,31 @@ export async function switchableProjects(): Promise<{ id: string; name: string; 
   if (!uid) return [];
   return (await membershipsOf(uid)).map((m) => ({ id: m.projectId, name: m.projectName, role: m.role }));
 }
+
+/** The current user's id, or null outside multi mode / without a session. The one place
+ *  server actions get "who is doing this" from. */
+export async function currentUserId(): Promise<string | null> {
+  if (AUTH_MODE !== "multi") return null;
+  const session = await auth();
+  return session?.user?.id ?? null;
+}
+
+/**
+ * Point the session at a project — but only one the user actually belongs to. The
+ * cookie is never trusted on read (currentProject re-checks it), and it is not trusted
+ * on write either: setting it to a project you are not in simply fails here, so a forged
+ * form value cannot park you in someone else's tenant.
+ */
+export async function setCurrentProject(projectId: string): Promise<boolean> {
+  const uid = await currentUserId();
+  if (!uid) return false;
+  if (!(await membershipFor(uid, projectId))) return false;
+  const jar = await cookies();
+  jar.set(PROJECT_COOKIE, projectId, {
+    httpOnly: true,
+    sameSite: "lax",
+    path: "/",
+    secure: process.env.COOKIE_SECURE === "true",
+  });
+  return true;
+}

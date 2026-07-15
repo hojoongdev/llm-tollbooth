@@ -1,13 +1,21 @@
 "use client";
 
 import { usePathname } from "next/navigation";
-import { BellRing, CircleDollarSign, KeyRound, LayoutDashboard, LogOut, ScrollText, SlidersHorizontal, Sparkles, TrafficCone, type LucideIcon } from "lucide-react";
+import { BellRing, CircleDollarSign, KeyRound, LayoutDashboard, LogOut, ScrollText, SlidersHorizontal, Sparkles, TrafficCone, Users, type LucideIcon } from "lucide-react";
 
 import { logout } from "@/app/login/actions";
 import { PROJECT } from "@/lib/config";
 import { cn } from "@/lib/utils";
 import { usePendingNav } from "./pending-nav";
+import { ProjectSwitcher, type SwitcherProject } from "./ProjectSwitcher";
 import { ThemeToggle } from "./theme-toggle";
+
+/** In multi mode the layout resolves the session's project and the switchable list and
+ *  passes them down; in none/single these are undefined and the env project name shows. */
+export interface ProjectContext {
+  current: { id: string; name: string; role: string };
+  projects: SwitcherProject[];
+}
 
 function SignOutButton() {
   return (
@@ -54,7 +62,15 @@ const NAV: { section: string; items: NavItem[] }[] = [
   },
 ];
 
-const ALL_ITEMS = NAV.flatMap((group) => group.items);
+/** The nav, plus the multi-mode "Project" (members/roles) item when there's a tenant. */
+function navFor(multi: boolean): { section: string; items: NavItem[] }[] {
+  if (!multi) return NAV;
+  return NAV.map((group) =>
+    group.section === "Console"
+      ? { ...group, items: [{ href: "/project", label: "Project", icon: Users }, ...group.items] }
+      : group,
+  );
+}
 
 function matches(href: string, current: string) {
   return href === "/" ? current === "/" : current.startsWith(href);
@@ -104,7 +120,7 @@ function useActiveHref() {
 }
 
 /** Fixed rail on md+. */
-export function AppSidebar({ authEnabled }: { authEnabled?: boolean }) {
+export function AppSidebar({ authEnabled, project }: { authEnabled?: boolean; project?: ProjectContext }) {
   const active = useActiveHref();
   return (
     <aside className="sticky top-0 hidden h-svh w-52 shrink-0 flex-col border-r border-border bg-card md:flex">
@@ -112,7 +128,7 @@ export function AppSidebar({ authEnabled }: { authEnabled?: boolean }) {
         <Brand />
       </div>
       <nav className="flex flex-1 flex-col gap-0.5 p-2">
-        {NAV.map((group) => (
+        {navFor(Boolean(project)).map((group) => (
           <div key={group.section} className="flex flex-col gap-0.5">
             <div className="px-2 pb-1.5 pt-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
               {group.section}
@@ -124,10 +140,19 @@ export function AppSidebar({ authEnabled }: { authEnabled?: boolean }) {
         ))}
       </nav>
       <div className="mt-auto flex flex-col gap-2 border-t border-border p-3">
-        <div className="flex items-center justify-between text-xs">
-          <span className="text-muted-foreground">project</span>
-          <span className="font-mono tabular-nums">{PROJECT}</span>
-        </div>
+        {project ? (
+          <div className="flex flex-col gap-1">
+            <span className="px-0.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+              project
+            </span>
+            <ProjectSwitcher current={project.current} projects={project.projects} />
+          </div>
+        ) : (
+          <div className="flex items-center justify-between text-xs">
+            <span className="text-muted-foreground">project</span>
+            <span className="font-mono tabular-nums">{PROJECT}</span>
+          </div>
+        )}
         <div className="flex items-center justify-between gap-2">
           <ThemeToggle />
           {authEnabled ? <SignOutButton /> : null}
@@ -138,13 +163,13 @@ export function AppSidebar({ authEnabled }: { authEnabled?: boolean }) {
 }
 
 /** Top bar on mobile (md:hidden). */
-export function MobileBar({ authEnabled }: { authEnabled?: boolean }) {
+export function MobileBar({ authEnabled, project }: { authEnabled?: boolean; project?: ProjectContext }) {
   const active = useActiveHref();
   return (
     <header className="sticky top-0 z-30 flex h-12 items-center gap-3 border-b border-border bg-card px-4 md:hidden">
       <Brand />
       <nav className="ml-auto flex items-center gap-1">
-        {ALL_ITEMS.map((item) => (
+        {navFor(Boolean(project)).flatMap((group) => group.items).map((item) => (
           <NavLink key={item.href} {...item} active={matches(item.href, active)} />
         ))}
         <ThemeToggle />
