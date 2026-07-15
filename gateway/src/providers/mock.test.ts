@@ -2,8 +2,15 @@ import { describe, expect, it } from "vitest";
 
 import { estimateTokens } from "../tokens.js";
 import { MockProvider } from "./mock.js";
+import type { ChatCompletionChunk } from "./types.js";
 
 const mock = new MockProvider();
+
+async function drain(iter: AsyncIterable<ChatCompletionChunk>): Promise<ChatCompletionChunk[]> {
+  const chunks: ChatCompletionChunk[] = [];
+  for await (const chunk of iter) chunks.push(chunk);
+  return chunks;
+}
 
 describe("MockProvider", () => {
   it("reports usage for the text it actually produced", async () => {
@@ -57,5 +64,26 @@ describe("MockProvider", () => {
     expect(response.model).toBe("gpt-4o-mini");
     expect(response.choices[0]!.message.role).toBe("assistant");
     expect(response.choices[0]!.finish_reason).toBe("stop");
+  });
+
+  it("streams frames that reassemble to a whole answer with matching usage", async () => {
+    // A streamed call has to bill exactly like a buffered one: the usage on the
+    // trailing frame must describe the text the frames actually delivered, or the
+    // console's numbers would depend on whether a client asked for a stream.
+    const chunks = await drain(
+      mock.stream({
+        model: "gpt-4o",
+        messages: [{ role: "user", content: "What does the tollbooth do?" }],
+      }),
+    );
+
+    const content = chunks.map((c) => c.choices[0]?.delta.content ?? "").join("");
+    const usage = chunks.find((c) => c.usage)?.usage;
+
+    expect(chunks[0]!.choices[0]!.delta.role).toBe("assistant");
+    expect(chunks.some((c) => c.choices[0]?.finish_reason === "stop")).toBe(true);
+    expect(content.length).toBeGreaterThan(0);
+    expect(usage?.completion_tokens).toBe(estimateTokens(content));
+    expect(usage?.total_tokens).toBe(usage!.prompt_tokens + usage!.completion_tokens);
   });
 });

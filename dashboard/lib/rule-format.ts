@@ -9,14 +9,20 @@
 
 import { count, ms, pct, usd } from "./format";
 
-/** Three conditions, and they are not the same shape (spec §4 group C). */
-export const CONDITIONS = ["metric_threshold", "budget_percent", "keyword_match"] as const;
+/** Four conditions, and they are not the same shape (spec §4 group C). */
+export const CONDITIONS = [
+  "metric_threshold",
+  "budget_percent",
+  "keyword_match",
+  "quality_drop",
+] as const;
 export type ConditionKind = (typeof CONDITIONS)[number];
 
 export const CONDITION_LABEL: Record<ConditionKind, string> = {
   metric_threshold: "Metric over a threshold",
   budget_percent: "Budget % reached",
   keyword_match: "Keyword in a call",
+  quality_drop: "Quality below a score",
 };
 
 export const METRICS = ["cost", "tokens", "latency_p95", "error_rate", "request_count"] as const;
@@ -81,6 +87,9 @@ export interface RuleRow {
   // keyword_match
   keyword: string;
   matchedIn: KeywordTarget;
+  // quality_drop
+  minScore: number;
+  minSamples: number;
 }
 
 export interface FiredAction {
@@ -153,6 +162,10 @@ export function ruleSummary(r: RuleRow): string {
       return r.matchedIn === "either"
         ? `“${r.keyword}” in the prompt or the response`
         : `“${r.keyword}” in the ${r.matchedIn}`;
+    case "quality_drop":
+      // The sample floor is part of what the rule is, not a detail: the same rule with a
+      // floor of 1 and a floor of 50 behave nothing alike on a sampled system.
+      return `quality below ${r.minScore} over ≥${r.minSamples} scored calls in the last ${r.windowHours}h`;
     default:
       return `${METRIC_PHRASE[r.metric]} over ${metricValue(r.metric, r.threshold)} in the last ${r.windowHours}h`;
   }

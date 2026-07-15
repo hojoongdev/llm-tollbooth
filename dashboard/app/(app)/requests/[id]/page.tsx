@@ -6,6 +6,7 @@ import { getRequest } from "@/lib/mongo";
 import { count, fmtTs, ms, usd } from "@/lib/format";
 import { PageBody } from "@/components/page-header";
 import { StatusBadge } from "@/components/status-badge";
+import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 
 export const dynamic = "force-dynamic";
@@ -33,6 +34,8 @@ export default async function RequestDetailPage({ params }: { params: Promise<{ 
     ["Error type", r.errorType ?? "—"],
     ["Feature tag", r.featureTag ?? "—"],
   ];
+  // Why the model that answered isn't the model that was asked for.
+  if (r.note) rows.push(["Note", r.note]);
 
   // Only calls that went through the gateway carry bodies; a synthetic loadgen
   // event is metrics and nothing else.
@@ -96,6 +99,41 @@ export default async function RequestDetailPage({ params }: { params: Promise<{ 
             <p className="whitespace-pre-wrap break-words px-4 py-3 font-mono text-sm leading-relaxed text-destructive">
               {r.error}
             </p>
+          </Panel>
+        ) : null}
+
+        {/* The score sits under the answer it is about, not up in the metadata table. It is a
+            judgment on that text, and reading it anywhere else means taking it on faith. Most
+            calls have none — eval samples — and that absence is left as an absence. */}
+        {r.evaluation ? (
+          <Panel title="Evaluation">
+            <div className="flex flex-col gap-2 px-4 py-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge
+                  variant={
+                    r.evaluation.overall < 3 ? "destructive" : r.evaluation.overall < 4 ? "warning" : "success"
+                  }
+                >
+                  {r.evaluation.overall.toFixed(2)} / 5
+                </Badge>
+                <span className="font-mono text-xs text-muted-foreground">
+                  relevance {r.evaluation.relevance} · hallucination risk {r.evaluation.hallucinationRisk} · tone{" "}
+                  {r.evaluation.tone}
+                </span>
+                <span className="ml-auto font-mono text-[11px] text-muted-foreground">
+                  judged by {r.evaluation.judge}
+                  {r.evaluation.scoredAt ? ` · ${fmtTs(new Date(r.evaluation.scoredAt))}` : ""}
+                </span>
+              </div>
+              {r.evaluation.reason ? (
+                <p className="text-sm italic leading-relaxed text-muted-foreground">“{r.evaluation.reason}”</p>
+              ) : null}
+              <p className="text-[11px] leading-relaxed text-muted-foreground">
+                relevance 와 tone 은 높을수록 좋고, <strong className="font-medium">hallucination risk 는 높을수록
+                나쁩니다</strong> — 종합 점수는 risk 를 뒤집어(6 − risk) 셋을 평균한 값이라 언제나 &ldquo;높을수록
+                좋음&rdquo;입니다.
+              </p>
+            </div>
           </Panel>
         ) : null}
 

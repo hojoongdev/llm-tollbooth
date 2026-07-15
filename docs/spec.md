@@ -187,6 +187,8 @@ CREATE TABLE rollup_hourly (
   latency_sum_ms counter, cache_hits counter,
   lat_count counter,          -- 히스토그램이 센 요청 수 (= 히스토그램의 분모)
   lat_le_10 counter, ... lat_le_10000 counter,   -- 지연 히스토그램 [P4]
+  quality_sum counter,        -- 평가 점수(1~5)의 합 × 100 [P5]
+  quality_count counter,      -- 실제로 채점된 호출 수 (= 품질 평균의 분모) [P5]
   PRIMARY KEY ((project_id, dim, day), hour)
 );
 ```
@@ -194,6 +196,8 @@ CREATE TABLE rollup_hourly (
 주의: 대시보드의 넓은 기간 조회는 raw 테이블이 아니라 `rollup_hourly`를 읽는다. 갱신은 **Cassandra counter**로 한다 — read-modify-write 없이 델타만 더하면 되기 때문이다. ingest worker는 배치(500건 또는 5초)를 메모리에서 (dim, hour) 버킷으로 먼저 접은 뒤 버킷당 UPDATE 한 번만 날린다. 500건이 카운터 왕복 1500번이 아니라 몇 번으로 접힌다.
 
 `lat_le_*`는 Prometheus `le` 방식의 **누적** 히스토그램이다(각 버킷은 자기 상한 *이하*의 요청 수). 누적 버킷은 덧셈이 되므로 창 전체의 백분위를 구하는 일이 다른 카운터와 똑같은 열 단위 합산이 된다. 분모는 `requests`가 아니라 `lat_count`를 쓴다 — 히스토그램이 생기기 *전에* 쓰인 행들은 `requests`만 있고 버킷이 없어서, `requests`로 나누면 그 요청들이 전부 최상위 버킷을 넘긴 것처럼 보여 p99가 천장에 붙는다. 히스토그램은 자기 분모를 직접 들고 다녀야 한다.
+
+`quality_*`는 **eval worker가** 같은 행에 쓴다(ingest worker가 아니라). 두 writer가 서로소 칼럼만 건드리고 counter 는 덧셈이라 조율이 필요 없다. 여기서도 분모는 `requests`가 아니라 `quality_count`다 — 평가는 **샘플링**이라 대부분의 요청은 채점되지 않으며, `requests`로 나누면 멀쩡한 시스템의 품질이 0에 가깝게 보인다. 점수는 정수 counter 에 담으려고 ×100 해서 넣는다(돈을 마이크로달러로 넣는 것과 같은 이유).
 
 ### 7.3 MongoDB (유연한 문서 담당)
 
@@ -206,6 +210,7 @@ CREATE TABLE rollup_hourly (
 | `provider_pricing` | 모델별 단가표 (시드 + 편집 가능) |
 | `cache_entries` | 응답 캐시 (hash key, response, TTL 인덱스) |
 | `rule_firings` | 규칙 발화 이력 (언제, 어떤 규칙, 어떤 액션, 결과) |
+| `settings` | 콘솔이 편집하고 워커가 주기적으로 다시 읽는 설정 (`_id: "eval"` = 샘플링 비율/평가 모델/필터) [P5] |
 
 `requests`는 크기가 커질 수 있으므로 TTL 인덱스(기본 30일, 설정 가능)로 자동 정리.
 

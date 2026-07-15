@@ -18,6 +18,9 @@ export interface ApiKey {
   // Set from the console; enforced here (budget.ts). Absent or null = no limit.
   budget?: { daily_usd: number | null; monthly_usd: number | null };
   rate_limit?: { rpm: number | null };
+  /** A model to retry on when this key's calls fail upstream (spec §4 B). Overrides
+   *  the global GATEWAY_FALLBACK_MODEL; unset means fall back to that (or to nothing). */
+  fallback_model?: string | null;
 }
 
 const keys = () => collection<ApiKey>("api_keys");

@@ -22,6 +22,7 @@ from main import (
     dims_of,
     email_body,
     evaluate_budget,
+    evaluate_quality,
     evaluate_threshold,
     firing_doc,
     keyword_hit,
@@ -120,16 +121,17 @@ def test_metric_threshold_is_the_default_condition_type():
 
 
 def test_every_built_condition_is_recognised():
-    for kind in ("metric_threshold", "budget_percent", "keyword_match"):
+    # All four now (spec §4 group C): quality_drop was refused by name until Eval existed
+    # to answer it, and it exists.
+    for kind in ("metric_threshold", "budget_percent", "keyword_match", "quality_drop"):
         assert condition_kind({"type": kind}) == kind
 
 
 def test_an_unknown_condition_type_is_an_error():
-    # quality_drop is spec'd for P5, after Eval. A rule asking for it must be refused
-    # loudly — silently treating it as a cost threshold would leave someone with a rule
-    # that looks armed on the screen and is watching something else entirely.
+    # Silently treating an unrecognised type as a cost threshold would leave someone with a
+    # rule that looks armed on the screen and is watching something else entirely.
     with pytest.raises(ValueError, match="unknown condition type"):
-        condition_kind({"type": "quality_drop", "threshold": 0.5})
+        condition_kind({"type": "sentiment_drop", "threshold": 0.5})
 
 
 # --------------------------------------------------------------------------- #
@@ -206,6 +208,90 @@ def test_a_budget_rule_on_a_key_with_no_budget_is_an_error_not_a_zero():
         evaluate_budget(condition, spent=4.00, cap=None)
     with pytest.raises(ValueError, match="needs a key with a budget"):
         evaluate_budget(condition, spent=4.00, cap=0)
+
+
+# --------------------------------------------------------------------------- #
+# evaluate_quality — the condition P4 could not answer
+# --------------------------------------------------------------------------- #
+def scored(count: int, mean: float, requests: int = 1_000) -> Window:
+    """A window in which `count` calls were scored, averaging `mean`. `requests` is
+    deliberately much larger: eval samples, so most calls are never judged."""
+    return Window(
+        cost=0.0, requests=requests, errors=0, tokens=0, latency_p95=0.0,
+        quality_sum=round(mean * 100) * count, quality_count=count,
+    )
+
+
+def test_the_average_divides_by_what_was_scored_not_by_what_was_served():
+    # The whole reason quality_count exists. 20 scored calls averaging 4.0 in a window of
+    # 1000 requests is a quality of 4.0 — dividing by `requests` would call it 0.08 and
+    # trip every quality rule on a perfectly healthy system.
+    assert scored(20, 4.0).quality == 4.0
+    assert EMPTY_WINDOW.quality == 0.0
+
+
+def test_a_quality_rule_fires_when_the_average_falls_below_the_line():
+    condition = {"type": "quality_drop", "min_score": 3.5}
+
+    tripped, observed = evaluate_quality(condition, scored(10, 2.80))
+    assert tripped
+    assert observed == pytest.approx(2.80)
+
+
+def test_a_quality_rule_stays_quiet_at_or_above_the_line():
+    # "미만" — below. A window sitting exactly on its floor has not dropped below it, and
+    # this is the mirror image of metric_threshold's strict "over".
+    condition = {"type": "quality_drop", "min_score": 3.5}
+    assert not evaluate_quality(condition, scored(10, 3.50))[0]
+    assert not evaluate_quality(condition, scored(10, 4.20))[0]
+
+
+def test_a_window_with_no_scores_never_fires():
+    # The trap this guards: an unscored window averages 0.0, and 0.0 is below every
+    # threshold anyone would set. Without this, turning eval off — or simply being ahead of
+    # it — would make every quality rule fire continuously, which is the loudest possible
+    # way to say "no data".
+    condition = {"type": "quality_drop", "min_score": 3.5}
+    tripped, observed = evaluate_quality(condition, scored(0, 0.0))
+    assert not tripped
+    assert observed == 0.0
+    assert not evaluate_quality(condition, EMPTY_WINDOW)[0]
+
+
+def test_a_quality_rule_wants_enough_evidence_before_it_wakes_anyone():
+    # At a 10% sample rate a quiet hour might be judged once. An average of one is not an
+    # average, and paging someone over it is noise dressed as a signal.
+    condition = {"type": "quality_drop", "min_score": 3.5}
+    assert not evaluate_quality(condition, scored(1, 1.0))[0]   # awful, but n=1
+    assert not evaluate_quality(condition, scored(4, 1.0))[0]   # still under the default floor of 5
+    assert evaluate_quality(condition, scored(5, 1.0))[0]       # enough to speak
+
+
+def test_a_rule_can_set_its_own_evidence_floor():
+    condition = {"type": "quality_drop", "min_score": 3.5, "min_samples": 25}
+    assert not evaluate_quality(condition, scored(20, 2.0))[0]
+    assert evaluate_quality(condition, scored(25, 2.0))[0]
+
+    # And lower it, for a scope where any bad answer matters.
+    eager = {"type": "quality_drop", "min_score": 3.5, "min_samples": 1}
+    assert evaluate_quality(eager, scored(1, 2.0))[0]
+
+
+def test_a_quality_firing_says_how_much_evidence_it_rests_on():
+    # "quality is 2.4" means something different over 6 scored calls than over 600, and the
+    # person reading the alert is entitled to know which one it was.
+    rule = {
+        "_id": "rule_q",
+        "name": "quality",
+        "scope": "model:gpt-4o",
+        "cooldown_seconds": 1800,
+        "condition": {"type": "quality_drop", "min_score": 3.5, "window_hours": 6},
+    }
+    firing = firing_doc(rule, "quality_drop", 2.4166, NOW, scored=6)
+
+    assert firing["threshold"] == 3.5
+    assert "average quality 2.42 below 3.5" in firing["detail"]
+    assert "across 6 scored calls in the last 6h" in firing["detail"]
 
 
 # --------------------------------------------------------------------------- #

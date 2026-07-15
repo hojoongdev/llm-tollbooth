@@ -3,7 +3,8 @@ import { randomUUID } from "node:crypto";
 import { MOCK_ERROR_RATE, MOCK_JITTER_MS, MOCK_LATENCY_MS } from "../config.js";
 import { GatewayError } from "../errors.js";
 import { estimateTokens } from "../tokens.js";
-import type { ChatRequest, Provider, ProviderResult } from "./types.js";
+import { deltaChunk, usageChunk } from "./chunks.js";
+import type { ChatCompletionChunk, ChatRequest, Provider, ProviderResult } from "./types.js";
 
 /**
  * The built-in fake LLM (spec §5): the stack has to be demo-able and load-testable
@@ -71,6 +72,59 @@ export class MockProvider implements Provider {
       },
     };
   }
+
+  /**
+   * The same fake answer, delivered a piece at a time — so streaming can be demoed
+   * and load-tested without a real provider, exactly like chat().
+   *
+   * The content is built whole and then sliced, so the tokens still describe the
+   * text that was actually sent, and the trailing usage chunk carries the real
+   * count. The injected failure fires *before the first chunk*, which is what lets
+   * the gateway still turn it into a proper HTTP error rather than a torn stream.
+   */
+  async *stream(req: ChatRequest): AsyncIterable<ChatCompletionChunk> {
+    const prompt = req.messages.map((m) => m.content ?? "").join("\n");
+    const promptTokens = estimateTokens(prompt);
+    const budget = Math.min(req.max_tokens ?? 512, 32 + Math.round(promptTokens * 0.3));
+    const content = buildReply(req.messages, budget);
+    const completionTokens = estimateTokens(content);
+
+    const latency = MOCK_LATENCY_MS + Math.round(Math.random() * MOCK_JITTER_MS);
+    const ttfb = Math.round(latency * 0.4);
+    const id = `chatcmpl-${randomUUID()}`;
+    const created = Math.floor(Date.now() / 1000);
+
+    await sleep(ttfb);
+    if (MOCK_ERROR_RATE > 0 && Math.random() < MOCK_ERROR_RATE) {
+      throw new GatewayError("provider_error", "mock provider: injected failure", 502);
+    }
+
+    yield deltaChunk(id, created, req.model, { role: "assistant" });
+
+    const pieces = sliceText(content, 16);
+    const gap = pieces.length ? (latency - ttfb) / pieces.length : 0;
+    for (const piece of pieces) {
+      await sleep(gap);
+      yield deltaChunk(id, created, req.model, { content: piece });
+    }
+
+    yield deltaChunk(id, created, req.model, {}, "stop");
+    yield usageChunk(id, created, req.model, {
+      prompt_tokens: promptTokens,
+      completion_tokens: completionTokens,
+      total_tokens: promptTokens + completionTokens,
+    });
+  }
+}
+
+/** Cut text into roughly `count` contiguous pieces, so a stream arrives in frames
+ *  instead of all at once. Reassembling them yields the original exactly. */
+function sliceText(text: string, count: number): string[] {
+  if (!text) return [];
+  const size = Math.max(1, Math.ceil(text.length / count));
+  const pieces: string[] = [];
+  for (let i = 0; i < text.length; i += size) pieces.push(text.slice(i, i + size));
+  return pieces;
 }
 
 /** An answer that quotes what it was asked, padded to roughly `budget` tokens. */

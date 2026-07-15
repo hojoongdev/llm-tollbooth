@@ -33,7 +33,9 @@ export function RulesTable({ rows, now }: { rows: RuleRow[]; now: number }) {
             ? { label: `Over (${METRIC_UNIT[r.metric]})`, value: r.threshold, step: "any" }
             : r.kind === "budget_percent"
               ? { label: "Reaches (%)", value: r.percent, step: "1" }
-              : null;
+              : r.kind === "quality_drop"
+                ? { label: "Below (1–5)", value: r.minScore, step: "0.1" }
+                : null;
 
         return (
           <li key={r.id} className="flex flex-col gap-3 px-4 py-3">

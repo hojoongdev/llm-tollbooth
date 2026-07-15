@@ -4,7 +4,7 @@ A rule is a condition, a scope, a cooldown and a set of actions. This worker con
 llm.events on its own Kafka consumer group, evaluates every enabled rule, and then emails,
 posts a webhook, blocks the key or tags the requests that made up the breach.
 
-Three conditions, and they are not all the same shape (spec §4 group C):
+Four conditions, and they are not all the same shape (spec §4 group C):
 
   metric_threshold  A window of traffic went over a line — cost, tokens, latency p95, error
                     rate, request count. Answered by the hourly rollup, on a timer.
@@ -15,6 +15,11 @@ Three conditions, and they are not all the same shape (spec §4 group C):
                     answer — the text is in neither the rollup nor the event — so it is the
                     one condition evaluated per event, against the request document, and
                     the one that samples.
+  quality_drop      The average score the eval worker gave this scope has fallen below a
+                    line. The rollup again — the eval worker writes quality counters onto
+                    the same rows — but it is the one condition whose evidence does not
+                    arrive on the event stream, and the one that tests *below* rather than
+                    above. Both of those change how it has to be scheduled; see run_pass.
 
 Why the rollup rather than the event stream:
   A rule asks a question about a *window* — "has this key spent more than $5 in the
@@ -132,14 +137,21 @@ TAG_LIMIT = int(os.environ.get("RULES_TAG_LIMIT", "5000"))
 # The read only happens at all when a keyword rule is actually watching that scope.
 KEYWORD_SAMPLE_RATE = float(os.environ.get("RULES_KEYWORD_SAMPLE_RATE", "1.0"))
 
-# The condition types (spec §4 group C). quality_drop is spec'd for P5, after Eval — a
-# rule asking for it is refused by name rather than guessed at.
-CONDITIONS = ("metric_threshold", "budget_percent", "keyword_match")
+# The condition types (spec §4 group C), all four of them now that Eval exists.
+CONDITIONS = ("metric_threshold", "budget_percent", "keyword_match", "quality_drop")
 # The metrics a threshold can be written against.
 METRICS = ("cost", "tokens", "latency_p95", "error_rate", "request_count")
 BUDGET_PERIODS = ("daily", "monthly")
 KEYWORD_TARGETS = ("prompt", "response", "either")
 ACTIONS = ("email", "webhook", "block", "tag")
+
+# How many scored calls a quality_drop rule needs before it is willing to speak.
+#
+# Eval samples — at 10% an hour of light traffic might be judged once or twice — and an
+# average over one sample is not an average. Paging someone because a single sampled
+# answer scored a 2 is noise dressed as a signal, and the second time it happens they
+# stop believing the alert. A rule can raise or lower its own floor; this is the default.
+MIN_QUALITY_SAMPLES = int(os.environ.get("RULES_MIN_QUALITY_SAMPLES", "5"))
 
 _running = True
 
@@ -238,8 +250,8 @@ def prepare(session: Session, bounds: Sequence[int]) -> dict[str, PreparedStatem
     return {
         "rollup": session.prepare(
             "SELECT day, hour, cost_micros, requests, errors, prompt_tokens, "
-            f"completion_tokens, lat_count, {hist_cols} FROM rollup_hourly "
-            "WHERE project_id = ? AND dim = ? AND day IN ?"
+            f"completion_tokens, lat_count, quality_sum, quality_count, {hist_cols} "
+            "FROM rollup_hourly WHERE project_id = ? AND dim = ? AND day IN ?"
         ),
     }
 
@@ -256,10 +268,21 @@ class Window:
     errors: int
     tokens: int
     latency_p95: float   # ms
+    # Written by the *eval* worker, onto the same rollup rows (init.cql). Scores ride as
+    # score*100 so the counter can stay an integer, exactly as money rides as micros.
+    quality_sum: int = 0
+    quality_count: int = 0
 
     @property
     def error_rate(self) -> float:
         return self.errors / self.requests if self.requests else 0.0
+
+    @property
+    def quality(self) -> float:
+        """The average score, 1..5. Its denominator is quality_count and never `requests`:
+        eval *samples*, so most requests in this window were never scored, and dividing by
+        them would report a quality of near-zero for a system that is working fine."""
+        return self.quality_sum / self.quality_count / 100 if self.quality_count else 0.0
 
 
 EMPTY_WINDOW = Window(cost=0.0, requests=0, errors=0, tokens=0, latency_p95=0.0)
@@ -329,6 +352,7 @@ def read_window(
     rows = session.execute(stmts["rollup"], (PROJECT, dim, days))
 
     cost_micros = requests = errors = tokens = lat_count = 0
+    quality_sum = quality_count = 0
     hist = [0] * len(bounds)
 
     for row in rows:
@@ -345,6 +369,8 @@ def read_window(
         errors += row.errors or 0
         tokens += (row.prompt_tokens or 0) + (row.completion_tokens or 0)
         lat_count += row.lat_count or 0
+        quality_sum += row.quality_sum or 0
+        quality_count += row.quality_count or 0
         for i, bound in enumerate(bounds):
             hist[i] += getattr(row, f"lat_le_{bound}") or 0
 
@@ -354,6 +380,8 @@ def read_window(
         errors=errors,
         tokens=tokens,
         latency_p95=percentile(bounds, hist, lat_count, 0.95),
+        quality_sum=quality_sum,
+        quality_count=quality_count,
     )
 
 
@@ -458,6 +486,33 @@ def evaluate_budget(condition: dict, spent: float, cap: float | None) -> tuple[b
     return observed >= float(condition["percent"]), observed
 
 
+def evaluate_quality(condition: dict, w: Window) -> tuple[bool, float]:
+    """quality_drop — has the average score fallen below the line? -> (tripped, that average)
+
+    `<`, and that is the spec's own word: 임계값 *미만*, below. metric_threshold reads "over"
+    and uses `>`; budget_percent reads "reached" and uses `>=`. Each condition compares the
+    way the sentence it is written in compares.
+
+    Two guards, both about what sampling does to an average:
+
+    A window with *no* scored calls never trips. Its average is not zero — it is unknown —
+    and zero is below every threshold anyone would set, so a rule reading "alert me when
+    quality drops below 3" would fire continuously on a system where evaluation happens to
+    be switched off, or has simply not caught up yet. That is the loudest imaginable way to
+    report "no data", and it would train someone to ignore the alert that matters.
+
+    A window with too *few* scores does not trip either. At a 10% sample rate a quiet hour
+    might be judged once, and an average of one is not an average. min_samples is how much
+    evidence this rule wants before it is willing to wake someone (MIN_QUALITY_SAMPLES by
+    default) — the observed value is still returned, so a rule that stayed quiet for lack of
+    evidence can still be understood from the logs.
+    """
+    needed = int(condition.get("min_samples") or MIN_QUALITY_SAMPLES)
+    if w.quality_count < needed:
+        return False, w.quality
+    return w.quality < float(condition["min_score"]), w.quality
+
+
 # --------------------------------------------------------------------------- #
 # keyword_match — the one condition no rollup can answer
 # --------------------------------------------------------------------------- #
@@ -519,6 +574,16 @@ def trigger_text(firing: dict) -> str:
     if kind == "keyword_match":
         return f"{firing.get('keyword')!r} found in the {firing.get('matched_in')}"
 
+    if kind == "quality_drop":
+        # The sample size is part of the claim, not a footnote: "quality is 2.4" means
+        # something different over 6 scored calls than over 600, and the person reading
+        # this at 3am is entitled to know which one it was.
+        return (
+            f"average quality {firing['observed']:.2f} below {firing['threshold']:g} "
+            f"across {firing.get('scored')} scored calls in the last "
+            f"{firing.get('window_hours')}h"
+        )
+
     return (
         f"{firing.get('metric')} {firing['observed']:.6g} over {firing['threshold']:g} "
         f"in the last {firing.get('window_hours')}h"
@@ -569,9 +634,15 @@ def firing_doc(rule: dict, kind: str, observed: float, now: datetime, **extra) -
         "scope": rule.get("scope") or "all",
         "condition_type": kind,
         "observed": observed,
-        # The number it had to beat. A percentage for budget_percent, a threshold for
-        # metric_threshold, and nothing meaningful for keyword_match.
-        "threshold": float(condition.get("threshold") or condition.get("percent") or 0),
+        # The number it had to beat. A percentage for budget_percent, a score for
+        # quality_drop, a threshold for metric_threshold, and nothing meaningful for
+        # keyword_match.
+        "threshold": float(
+            condition.get("threshold")
+            or condition.get("percent")
+            or condition.get("min_score")
+            or 0
+        ),
         "metric": condition.get("metric"),
         "window_hours": int(condition.get("window_hours") or 1),
         **extra,
@@ -842,7 +913,21 @@ def run_pass(
         if kind == "keyword_match":
             continue
 
-        if scopes is not None and scope not in scopes:
+        # quality_drop is exempt from the active-scope filter, and it is the one condition
+        # that has to be. The filter rests on an argument that is true of the others and
+        # false of this one: a scope that saw no traffic cannot have newly crossed an
+        # "over" line, because with no traffic its window only shrinks.
+        #
+        # A quality window does not work that way. Its evidence is written by the *eval*
+        # worker, straight to the rollup, some seconds after the call it describes — by
+        # which time this scope may well have gone quiet and be filtered out. And it is a
+        # *below* test: as the good hours age out of the window, the average can fall past
+        # the line with no new traffic at all. Filtering it would produce a rule that only
+        # notices bad quality while traffic keeps arriving, which is not what it promises.
+        #
+        # The cost of exempting it is one rollup read per quality rule per pass, and the
+        # windows cache below means rules sharing a (scope, window) still share that read.
+        if kind != "quality_drop" and scopes is not None and scope not in scopes:
             continue
 
         extra: dict = {}
@@ -857,6 +942,15 @@ def run_pass(
                 spent = read_spend(session, stmts, scope, budget_days(period, now))
                 tripped, observed = evaluate_budget(condition, spent, cap)
                 extra = {"period": period, "spent": spent, "cap": cap}
+            elif kind == "quality_drop":
+                hours = int(condition.get("window_hours") or 1)
+                if (scope, hours) not in windows:
+                    windows[(scope, hours)] = read_window(session, stmts, bounds, scope, hours, now)
+                window = windows[(scope, hours)]
+                tripped, observed = evaluate_quality(condition, window)
+                # How much evidence the average rests on. It rides on the firing because the
+                # sentence the worker writes says it out loud — see trigger_text.
+                extra = {"scored": window.quality_count}
             else:
                 hours = int(condition.get("window_hours") or 1)
                 if (scope, hours) not in windows:
@@ -882,6 +976,15 @@ def run_pass(
         fired += 1
 
     return fired
+
+
+def watch_quality(store: Store) -> bool:
+    """Is any quality rule enabled? Re-asked once per pass, not once per event.
+
+    It is the one thing that can make a pass worth running with no traffic at all — see
+    the note in main() for why quality is the exception to "no traffic, no crossing".
+    """
+    return store.rules.count_documents({"enabled": True, "condition.type": "quality_drop"}, limit=1) > 0
 
 
 def check_keywords(store: Store, watchers: list[dict], event: dict) -> int:
@@ -1005,6 +1108,18 @@ def main() -> None:
     keyword_rules: list[dict] = list(
         store.rules.find({"enabled": True, "condition.type": "keyword_match"})
     )
+    # Is any quality rule watching? If so, a pass is due every EVAL_SECONDS whether or not
+    # a single event arrived — and this is the loop's counterpart to the exemption in
+    # run_pass, without which that exemption is dead code.
+    #
+    # The `active` optimisation below skips the whole pass when nothing moved, and for the
+    # other conditions that is sound: no traffic, no new crossing. A quality rule breaks
+    # both halves of that argument. Its evidence is written to the rollup by the *eval*
+    # worker, seconds after the call it describes and long after the event went by; and it
+    # tests *below* a line, which an aging window can cross with no traffic at all. Gate it
+    # on traffic and it becomes a rule that only notices bad quality while the calls keep
+    # coming — which is precisely when nobody is looking.
+    watching_quality = watch_quality(store)
     pending = 0
     last_eval = time.monotonic()
 
@@ -1028,7 +1143,7 @@ def main() -> None:
             if (time.monotonic() - last_eval) < EVAL_SECONDS:
                 continue
 
-            if check_everything or active:
+            if check_everything or active or watching_quality:
                 run_pass(
                     session, stmts, bounds, store,
                     None if check_everything else set(active),
@@ -1039,6 +1154,7 @@ def main() -> None:
             keyword_rules = list(
                 store.rules.find({"enabled": True, "condition.type": "keyword_match"})
             )
+            watching_quality = watch_quality(store)
 
             # Only now: a pass that raised would leave the offsets where they were,
             # and the events that triggered it would be re-read.

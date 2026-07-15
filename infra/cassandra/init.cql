@@ -79,6 +79,16 @@ CREATE TABLE IF NOT EXISTS metrics_by_key (
 -- ALTER TABLE. That is the price of p95 being a free by-product of a row the
 -- dashboard already reads, and the ladder (10ms .. 10s) spans everything from a
 -- cache hit to a slow completion, so it should not need re-cutting.
+--
+-- quality_sum / quality_count are the eval worker's territory (P5). Eval is
+-- *sampled* — only a fraction of calls get scored by the judge LLM — so unlike
+-- every counter above, quality_count is emphatically not `requests`: it is how
+-- many calls were actually scored, and it is the average's honest denominator for
+-- exactly the reason lat_count is. Scores are 1..5 and ride as score*100, so the
+-- counter stays integer and the average keeps two decimals (cost_micros, again).
+-- The eval worker UPDATEs these on the same (project, dim, day, hour) row the
+-- ingest worker already writes — a second writer, disjoint columns, additive
+-- counters, so no coordination is needed between them.
 CREATE TABLE IF NOT EXISTS rollup_hourly (
   project_id text,
   dim text,
@@ -102,6 +112,8 @@ CREATE TABLE IF NOT EXISTS rollup_hourly (
   lat_le_2500 counter,
   lat_le_5000 counter,
   lat_le_10000 counter,
+  quality_sum counter,
+  quality_count counter,
   PRIMARY KEY ((project_id, dim, day), hour)
 );
 
@@ -125,6 +137,14 @@ ALTER TABLE rollup_hourly ADD IF NOT EXISTS (
   lat_le_2500 counter,
   lat_le_5000 counter,
   lat_le_10000 counter
+);
+
+-- The quality columns, same explicit migration for the same reason: a volume that
+-- already holds a rollup_hourly from P1..P4 predates the eval worker, and the
+-- CREATE above won't retrofit them. ADD IF NOT EXISTS is a no-op on a fresh volume.
+ALTER TABLE rollup_hourly ADD IF NOT EXISTS (
+  quality_sum counter,
+  quality_count counter
 );
 
 -- Which breakdown axes actually saw traffic, per day.

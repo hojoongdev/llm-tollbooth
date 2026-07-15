@@ -82,6 +82,13 @@ export interface Totals {
   p99: number;
   cacheHits: number;
   cacheHitRate: number;
+  /** Average judge score, 1–5. Meaningless unless `scored` > 0 — see below. */
+  quality: number;
+  /** How many calls were actually judged. Eval samples, so this is nearly always far
+   *  below `requests`, and it is the denominator `quality` divides by. Anything reading
+   *  `quality` has to check this first: an unscored window's average is not a zero, it
+   *  is an absence, and rendering it as 0.0 would report a healthy system as a broken one. */
+  scored: number;
 }
 
 export interface TrendPoint {
@@ -90,6 +97,8 @@ export interface TrendPoint {
   requests: number;
   errors: number;
   avgLatency: number;
+  quality: number;
+  scored: number;
 }
 
 export interface Overview {
@@ -113,6 +122,12 @@ interface Bucket {
   // hour written since the buckets landed, and zero for the hours written before —
   // which is exactly why the percentiles divide by this and not by `requests`.
   latencyCount: number;
+  // Written by the eval worker, not the ingest worker, onto these same rows. Scores
+  // ride as score*100 so the counter stays an integer (money rides as micros for the
+  // same reason). qualityCount is what the average divides by — and it is emphatically
+  // not `requests`, because eval samples.
+  qualitySum: number;
+  qualityCount: number;
 }
 
 const empty = (): Bucket => ({
@@ -120,6 +135,7 @@ const empty = (): Bucket => ({
   completionTokens: 0, latencySum: 0, cacheHits: 0,
   latencyHist: LATENCY_BOUNDS_MS.map(() => 0),
   latencyCount: 0,
+  qualitySum: 0, qualityCount: 0,
 });
 
 function add(b: Bucket, row: Record<string, unknown>): void {
@@ -131,6 +147,8 @@ function add(b: Bucket, row: Record<string, unknown>): void {
   b.latencySum += num(row.latency_sum_ms);
   b.cacheHits += num(row.cache_hits);
   b.latencyCount += num(row.lat_count);
+  b.qualitySum += num(row.quality_sum);
+  b.qualityCount += num(row.quality_count);
   for (let i = 0; i < LATENCY_COLUMNS.length; i++) {
     b.latencyHist[i] += num(row[LATENCY_COLUMNS[i]]);
   }
@@ -143,7 +161,8 @@ async function rollupRows(w: Window, dim: string) {
   const params = [PROJECT, dim, ...days.map((d) => types.LocalDate.fromString(d))];
   const cql =
     "SELECT day, hour, cost_micros, requests, errors, prompt_tokens, " +
-    `completion_tokens, latency_sum_ms, cache_hits, lat_count, ${LATENCY_COLUMNS.join(", ")} ` +
+    "completion_tokens, latency_sum_ms, cache_hits, lat_count, quality_sum, quality_count, " +
+    `${LATENCY_COLUMNS.join(", ")} ` +
     "FROM rollup_hourly " +
     `WHERE project_id = ? AND dim = ? AND day IN (${placeholders})`;
 
@@ -198,6 +217,8 @@ export async function readRollup(w: Window, dim = "all"): Promise<Overview> {
       requests: b.requests,
       errors: b.errors,
       avgLatency: b.requests ? b.latencySum / b.requests : 0,
+      quality: b.qualityCount ? b.qualitySum / b.qualityCount / 100 : 0,
+      scored: b.qualityCount,
     }));
 
   return { totals: summarize(totals), trend };
@@ -218,6 +239,10 @@ function summarize(b: Bucket): Totals {
     p99: percentile(b.latencyHist, b.latencyCount, 0.99),
     cacheHits: b.cacheHits,
     cacheHitRate: b.requests ? b.cacheHits / b.requests : 0,
+    // score*100 summed, over the count of what was actually scored. Zero when nothing
+    // was — and `scored` is what tells the caller which of those two a 0 means.
+    quality: b.qualityCount ? b.qualitySum / b.qualityCount / 100 : 0,
+    scored: b.qualityCount,
   };
 }
 
@@ -229,6 +254,8 @@ export interface ModelRow {
   cost: number;
   tokens: number;
   avgLatency: number;
+  quality: number;
+  scored: number;
 }
 
 /**
@@ -311,6 +338,8 @@ export async function modelBreakdown(w: Window): Promise<ModelRow[]> {
         cost: totals.cost,
         tokens: totals.totalTokens,
         avgLatency: totals.avgLatency,
+        quality: totals.quality,
+        scored: totals.scored,
       };
     }),
   );

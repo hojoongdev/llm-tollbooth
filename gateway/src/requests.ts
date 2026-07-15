@@ -28,6 +28,9 @@ export interface RequestDoc {
   };
   response: { id: string; content: string; finish_reason: string } | null;
   error: string | null;
+  /** A non-error annotation for the detail page — e.g. that the call fell back to
+   *  another model when its primary failed (spec §4 B). */
+  note?: string | null;
 }
 
 let log: FastifyBaseLogger;
@@ -48,6 +51,7 @@ export function storeRequest(
   chat: ChatRequest,
   response: ChatResponse | null,
   error: string | null,
+  note: string | null = null,
 ): void {
   const doc: Omit<RequestDoc, "_id"> = {
     ts: new Date(),
@@ -66,6 +70,7 @@ export function storeRequest(
         }
       : null,
     error,
+    ...(note ? { note } : {}),
   };
 
   collection<RequestDoc>("requests")

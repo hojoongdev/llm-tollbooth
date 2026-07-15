@@ -49,8 +49,41 @@ export interface ProviderResult {
   ttfbMs: number | null;
 }
 
+/**
+ * One frame of a streamed completion, in OpenAI's `chat.completion.chunk` shape —
+ * which is what the gateway forwards to the caller verbatim, for the same reason
+ * the non-streaming shape is OpenAI's: switching to the tollbooth is a base-URL
+ * change, so the bytes on the wire have to be the ones an OpenAI SDK expects.
+ *
+ * Each adapter's job is to turn its provider's native stream into these.
+ */
+export interface ChatCompletionChunk {
+  id: string;
+  object: "chat.completion.chunk";
+  created: number;
+  model: string;
+  choices: Array<{
+    index: number;
+    delta: { role?: "assistant"; content?: string };
+    finish_reason: string | null;
+  }>;
+  /**
+   * Present only on a trailing chunk, and only when the provider reports it
+   * (OpenAI with stream_options.include_usage, Anthropic's message_delta, the mock
+   * always). The gateway meters from this when it arrives and counts the streamed
+   * text itself when it does not — a stream still has to produce a bill.
+   */
+  usage?: Usage;
+}
+
 export interface Provider {
   /** Recorded as `provider` on the event — what actually served the call. */
   readonly name: string;
   chat(req: ChatRequest): Promise<ProviderResult>;
+  /**
+   * The streaming counterpart of chat(): yields OpenAI-shaped chunks the gateway
+   * pipes straight to the caller, ending with one that carries usage where the
+   * provider gives us the numbers to fill it.
+   */
+  stream(req: ChatRequest): AsyncIterable<ChatCompletionChunk>;
 }

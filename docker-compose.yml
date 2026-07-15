@@ -44,19 +44,29 @@ services:
 
   # One-shot: waits for the broker, then creates the llm.events topic with 6
   # partitions (so consumers can scale out later) and exits. Safe to re-run.
+  # Creates both topics and exits. llm.events carries every gateway call (consumed
+  # by ingest and rules); llm.eval.tasks is P5's seam between the eval worker's
+  # sampler (which decides what to score) and its scorer (which calls the judge
+  # LLM) — a buffer so slow scoring never holds up sampling. Both 6 partitions,
+  # for the same parallel-consumer demo as llm.events.
   kafka-init:
     image: apache/kafka:3.9.0
     container_name: llm-tollbooth-kafka-init
     depends_on:
       kafka:
         condition: service_healthy
-    entrypoint: ["/opt/kafka/bin/kafka-topics.sh"]
-    command: >
-      --bootstrap-server kafka:29092
-      --create --if-not-exists
-      --topic llm.events
-      --partitions 6
-      --replication-factor 1
+    entrypoint: ["/bin/sh", "-c"]
+    # One list element = one argv string for `sh -c`, so the whole script stays a
+    # single argument. ($$ escapes compose's own interpolation -> a literal $ for
+    # the shell.) set -e so a failed create exits non-zero and compose reports it.
+    command:
+      - |
+        set -e
+        for topic in llm.events llm.eval.tasks; do
+          /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:29092 \
+            --create --if-not-exists --topic "$$topic" \
+            --partitions 6 --replication-factor 1
+        done
     restart: "no"
 
   # Time-series metrics store. Absorbs the write-heavy stream of per-request rows
@@ -177,6 +187,9 @@ services:
       SELFHOST_BASE_URL: ${SELFHOST_BASE_URL:-}
       SELFHOST_API_KEY: ${SELFHOST_API_KEY:-}
       PROVIDER_TIMEOUT_MS: ${PROVIDER_TIMEOUT_MS:-60000}
+      # The model a failed call is retried on (P5). Empty = no fallback. A key can name
+      # its own in the console, which wins over this.
+      GATEWAY_FALLBACK_MODEL: ${GATEWAY_FALLBACK_MODEL:-}
       # Mock provider: the fake LLM that makes the stack demo-able with no real
       # API key. Zero *both* latency knobs to measure the gateway's own overhead —
       # leaving the jitter behind is measuring the jitter.
@@ -274,6 +287,53 @@ services:
       GATEWAY_INTERNAL_TOKEN: ${GATEWAY_INTERNAL_TOKEN:-local-dev-internal}
     restart: unless-stopped
 
+  # Eval worker: samples calls and scores their quality with a judge LLM (P5).
+  #
+  # Two loops in one process, with llm.eval.tasks between them: a sampler that reads
+  # llm.events and cheaply decides what is worth grading, and a scorer that makes the
+  # slow judge call. The topic is what keeps the slow half from stalling the fast one.
+  #
+  # The judge is the gateway itself — so evaluation works with no external API key
+  # (the mock answers), and pointing EVAL_MODEL at a real low-cost model is one line.
+  # It depends on the gateway for that reason, and provisions its own API key in Mongo
+  # on boot.
+  eval:
+    build: ./workers/eval
+    image: llm-tollbooth/eval
+    container_name: llm-tollbooth-eval
+    depends_on:
+      kafka:
+        condition: service_healthy
+      cassandra:
+        condition: service_healthy
+      cassandra-init:
+        condition: service_completed_successfully
+      mongodb:
+        condition: service_healthy
+      gateway:
+        condition: service_healthy
+    environment:
+      KAFKA_BOOTSTRAP: kafka:29092
+      KAFKA_TOPIC: llm.events
+      KAFKA_EVAL_TOPIC: llm.eval.tasks
+      CASSANDRA_CONTACT_POINTS: cassandra
+      CASSANDRA_KEYSPACE: tollbooth
+      MONGO_URI: mongodb://mongodb:27017
+      MONGO_DB: tollbooth
+      PROJECT_ID: default
+      # Seeds the settings document the console then owns (Settings screen). Editing
+      # it there takes effect within EVAL_SETTINGS_REFRESH_SECONDS — no restart.
+      # Whole-corpus evaluation costs a judge call per request; 10% is the spec's default.
+      EVAL_SAMPLE_RATE: ${EVAL_SAMPLE_RATE:-0.1}
+      EVAL_MODEL: ${EVAL_MODEL:-gpt-4o-mini}
+      # Empty = evaluate every model / every key. Comma-separated to narrow it.
+      EVAL_MODELS: ${EVAL_MODELS:-}
+      EVAL_KEYS: ${EVAL_KEYS:-}
+      # The worker calls the gateway like any other client, with its own key.
+      GATEWAY_URL: http://gateway:8080
+      EVAL_API_KEY: ${EVAL_API_KEY:-tb_eval_worker_key}
+    restart: unless-stopped
+
   # Console + read API. Server components read hourly rollups from Cassandra
   # (trends/cards) and request documents from MongoDB (log + detail). P2 ships
   # the Overview and Requests screens.
@@ -302,6 +362,14 @@ services:
       # gateway would be wrong, for half a minute.
       GATEWAY_URL: http://gateway:8080
       GATEWAY_INTERNAL_TOKEN: ${GATEWAY_INTERNAL_TOKEN:-local-dev-internal}
+      # Shown, not obeyed, on the Settings screen (spec §8 screen 6): these belong to the
+      # rules worker and the gateway, and the console reports what alerts and fallbacks will
+      # actually do. Reading them off the documented defaults instead would give a screen
+      # that is right until someone edits their .env, and then confidently wrong.
+      SMTP_HOST: ${SMTP_HOST:-mailpit}
+      SMTP_PORT: ${SMTP_PORT:-1025}
+      SMTP_FROM: ${SMTP_FROM:-alerts@tollbooth.local}
+      GATEWAY_FALLBACK_MODEL: ${GATEWAY_FALLBACK_MODEL:-}
       # Console login (spec §6). Empty by default => open console; set AUTH_MODE=single
       # plus the three values below in .env to require a login. No code changes.
       AUTH_MODE: ${AUTH_MODE:-none}
