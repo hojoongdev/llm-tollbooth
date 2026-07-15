@@ -343,13 +343,14 @@ def read_window(
     session: Session,
     stmts: dict[str, PreparedStatement],
     bounds: Sequence[int],
+    project: str,
     dim: str,
     hours: int,
     now: datetime,
 ) -> Window:
     """Sum the rollup over a window, for one breakdown axis. One partition per day."""
     days, start_hour = window_days(hours, now)
-    rows = session.execute(stmts["rollup"], (PROJECT, dim, days))
+    rows = session.execute(stmts["rollup"], (project, dim, days))
 
     cost_micros = requests = errors = tokens = lat_count = 0
     quality_sum = quality_count = 0
@@ -405,9 +406,9 @@ def budget_days(period: str, now: datetime) -> list[date]:
     raise ValueError(f"unknown budget period: {period!r} (expected one of {', '.join(BUDGET_PERIODS)})")
 
 
-def read_spend(session: Session, stmts: dict[str, PreparedStatement], dim: str, days: list[date]) -> float:
+def read_spend(session: Session, stmts: dict[str, PreparedStatement], project: str, dim: str, days: list[date]) -> float:
     """What one scope spent across whole day partitions. No hour filter — see budget_days."""
-    rows = session.execute(stmts["rollup"], (PROJECT, dim, days))
+    rows = session.execute(stmts["rollup"], (project, dim, days))
     return sum(row.cost_micros or 0 for row in rows) / 1_000_000
 
 
@@ -630,6 +631,9 @@ def firing_doc(rule: dict, kind: str, observed: float, now: datetime, **extra) -
     firing = {
         "rule_id": rule["_id"],
         "rule_name": rule.get("name"),
+        # The firing belongs to the rule's project, so the console's firing history —
+        # which reads listFirings(projectId) — shows a tenant only their own alerts.
+        "project_id": rule.get("project_id") or PROJECT,
         "fired_at": now,
         "scope": rule.get("scope") or "all",
         "condition_type": kind,
@@ -654,14 +658,18 @@ def firing_doc(rule: dict, kind: str, observed: float, now: datetime, **extra) -
 # --------------------------------------------------------------------------- #
 # Actions — the part with side effects
 # --------------------------------------------------------------------------- #
-def scope_query(scope: str, start: datetime, now: datetime) -> dict:
+def scope_query(project: str, scope: str, start: datetime, now: datetime) -> dict:
     """The request documents a scope covers over a window.
 
     The Mongo mirror of the rollup `dim` the condition was judged against. It has to
     select the same requests the counters counted, or a `tag` action would label a
     different set of calls than the one that tripped the rule.
+
+    Filtered by project_id too: a rule scoped to 'all' means all of *its* tenant's
+    traffic, and tagging every project's requests would both be wrong and leak the tag
+    across tenants.
     """
-    query: dict = {"ts": {"$gte": start, "$lte": now}}
+    query: dict = {"project_id": project, "ts": {"$gte": start, "$lte": now}}
     if scope.startswith("model:"):
         query["model"] = scope[len("model:"):]
     elif scope.startswith("key:"):
@@ -829,7 +837,7 @@ def act_tag(store: Store, firing: dict, action: dict, start: datetime, now: date
             raise ValueError(f"no such request: {firing['request_id']}")
         return f"tagged request {firing['request_id']} as {tag!r}"
 
-    query = scope_query(firing["scope"], start, now)
+    query = scope_query(firing.get("project_id") or PROJECT, firing["scope"], start, now)
     ids = [
         doc["_id"]
         for doc in store.requests.find(query, {"_id": 1}).sort("ts", DESCENDING).limit(TAG_LIMIT)
@@ -886,20 +894,28 @@ def run_pass(
     stmts,
     bounds: Sequence[int],
     store: Store,
-    scopes: set[str] | None,
+    scopes: set[tuple[str, str]] | None,
 ) -> int:
     """Evaluate every enabled rule once. `scopes=None` means "all of them".
+
+    `scopes`, when given, is a set of (project, scope) pairs that saw traffic since the
+    last pass — a rule is evaluated only if its own (project, scope) is among them.
 
     Rules on the same (scope, window) share one Cassandra read — several rules watching
     cost, tokens and error rate on the same key is the common case, and it is one
     question to the rollup, not three.
     """
     now = datetime.now(timezone.utc)
-    windows: dict[tuple[str, int], Window] = {}
+    # Keyed by (project, scope, hours) now: the same scope string 'all' or 'model:gpt-4o'
+    # exists in every tenant's partition, so a window is only shared between rules of the
+    # *same* project. Without the project in the key, one tenant's rollup would answer
+    # another's rule.
+    windows: dict[tuple[str, str, int], Window] = {}
     fired = 0
 
     for rule in store.rules.find({"enabled": True}):
         scope = rule.get("scope") or "all"
+        project = rule.get("project_id") or PROJECT
         condition = rule.get("condition") or {}
 
         try:
@@ -927,7 +943,7 @@ def run_pass(
         #
         # The cost of exempting it is one rollup read per quality rule per pass, and the
         # windows cache below means rules sharing a (scope, window) still share that read.
-        if kind != "quality_drop" and scopes is not None and scope not in scopes:
+        if kind != "quality_drop" and scopes is not None and (project, scope) not in scopes:
             continue
 
         extra: dict = {}
@@ -939,23 +955,23 @@ def run_pass(
                 period = condition.get("period") or "daily"
                 key_id = scope[len("key:"):]
                 cap = budget_cap(store, key_id, period)
-                spent = read_spend(session, stmts, scope, budget_days(period, now))
+                spent = read_spend(session, stmts, project, scope, budget_days(period, now))
                 tripped, observed = evaluate_budget(condition, spent, cap)
                 extra = {"period": period, "spent": spent, "cap": cap}
             elif kind == "quality_drop":
                 hours = int(condition.get("window_hours") or 1)
-                if (scope, hours) not in windows:
-                    windows[(scope, hours)] = read_window(session, stmts, bounds, scope, hours, now)
-                window = windows[(scope, hours)]
+                if (project, scope, hours) not in windows:
+                    windows[(project, scope, hours)] = read_window(session, stmts, bounds, project, scope, hours, now)
+                window = windows[(project, scope, hours)]
                 tripped, observed = evaluate_quality(condition, window)
                 # How much evidence the average rests on. It rides on the firing because the
                 # sentence the worker writes says it out loud — see trigger_text.
                 extra = {"scored": window.quality_count}
             else:
                 hours = int(condition.get("window_hours") or 1)
-                if (scope, hours) not in windows:
-                    windows[(scope, hours)] = read_window(session, stmts, bounds, scope, hours, now)
-                tripped, observed = evaluate_threshold(condition, windows[(scope, hours)])
+                if (project, scope, hours) not in windows:
+                    windows[(project, scope, hours)] = read_window(session, stmts, bounds, project, scope, hours, now)
+                tripped, observed = evaluate_threshold(condition, windows[(project, scope, hours)])
         except (KeyError, ValueError, TypeError) as exc:
             # A malformed rule is the console's bug, not a reason to stop watching every
             # other rule.
@@ -1005,8 +1021,10 @@ def check_keywords(store: Store, watchers: list[dict], event: dict) -> int:
     if not watchers or random.random() >= KEYWORD_SAMPLE_RATE:
         return 0
 
+    # (project, scope) membership: a keyword rule fires only on its own project's events,
+    # and only when its scope matches one the event landed on.
     dims = set(dims_of(event))
-    watching = [r for r in watchers if (r.get("scope") or "all") in dims]
+    watching = [r for r in watchers if ((r.get("project_id") or PROJECT), (r.get("scope") or "all")) in dims]
     if not watching:
         return 0
 
@@ -1064,13 +1082,19 @@ def build_consumer() -> Consumer:
     })
 
 
-def dims_of(event: dict) -> tuple[str, str, str]:
-    """The three rollup axes an event lands on — the same three the ingest worker
-    increments, and therefore the three scopes a rule could be watching."""
+def dims_of(event: dict) -> tuple[tuple[str, str], tuple[str, str], tuple[str, str]]:
+    """The (project, dim) pairs an event lands on — the three rollup axes the ingest
+    worker increments, each qualified by the event's project.
+
+    Qualified by project because a rule's scope is only unique *within* a tenant: 'all'
+    and 'model:gpt-4o' exist in every project. A pair, not a bare dim, is what lets the
+    active-scope filter tell one tenant's traffic from another's — and what stops a
+    keyword rule in one project from matching another project's calls."""
+    project = event.get("project_id") or PROJECT
     return (
-        "all",
-        f"model:{event.get('model') or 'unknown'}",
-        f"key:{event.get('api_key_id') or 'unknown'}",
+        (project, "all"),
+        (project, f"model:{event.get('model') or 'unknown'}"),
+        (project, f"key:{event.get('api_key_id') or 'unknown'}"),
     )
 
 
@@ -1096,7 +1120,7 @@ def main() -> None:
 
     # Scopes that saw a request since the last pass. Nothing else can have crossed an
     # "over" threshold: with no traffic a window only shrinks.
-    active: set[str] = set()
+    active: set[tuple[str, str]] = set()
     # ...except on the first pass, where we have no idea what happened while we were
     # down, so everything gets checked once.
     check_everything = True
