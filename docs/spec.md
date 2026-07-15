@@ -205,8 +205,11 @@ CREATE TABLE rollup_hourly (
 |---|---|
 | `requests` | 프롬프트/응답 전문, 헤더 메타, 평가 결과 embed. 요청마다 구조 상이 |
 | `rules` | 워크플로우 규칙 (condition/action 트리 — 타입별로 필드가 달라 문서형이 적합) |
-| `api_keys` | 키 해시, 이름, 프로젝트, 예산/리밋 설정, 상태(active/blocked) |
-| `projects`, `users` | 테넌트/계정 [P6 전까지는 default 프로젝트 1개] |
+| `api_keys` | 키 해시, 이름, 프로젝트, 예산/리밋 설정, 상태(active/blocked), fallback_model [P5] |
+| `users` | 이메일 + scrypt 비밀번호 해시 (multi 모드 로그인) [P6] |
+| `projects` | 테넌트. 모든 요청·키·규칙·지표가 이미 project_id 를 달고 있고(Cassandra 파티션 키가 P2부터 그걸로 시작), multi 모드가 그 id 를 실제 경계로 만든다 [P6] |
+| `memberships` | 누가 어느 프로젝트에 어떤 역할(owner/member)로 속하나 — 요청마다 하는 "이 유저가 이 프로젝트에 있나" 조회가 인덱스 한 번이 되도록 별도 컬렉션 [P6] |
+| `report_state` | 주간 리포트 발송 시각 (재시작해도 매일 리포트를 재발송하지 않도록) [P6] |
 | `provider_pricing` | 모델별 단가표 (시드 + 편집 가능) |
 | `cache_entries` | 응답 캐시 (hash key, response, TTL 인덱스) |
 | `rule_firings` | 규칙 발화 이력 (언제, 어떤 규칙, 어떤 액션, 결과) |
@@ -253,8 +256,8 @@ eval worker(샘플링, 평가 LLM), Quality 화면, 품질 조건 규칙 연동,
 완료 기준: 샘플링된 요청에 품질 점수가 붙고, 품질 하락 규칙이 발화한다. 스트리밍 요청이 정상 프록시되고 usage가 집계된다.
 
 **P6 — 멀티테넌시** 
-AUTH_MODE=multi: 가입/로그인, 프로젝트 격리, 멤버/역할, 주간 리포트 메일. 
-완료 기준: 두 계정이 서로의 데이터를 볼 수 없다.
+AUTH_MODE=multi: 가입/로그인(NextAuth + scrypt), 프로젝트 격리(세션의 현재 프로젝트로 모든 읽기를 좁힘 — 콘솔·rules·eval 워커 전부), 멤버/역할(owner/member, 마지막 owner 보호), 주간 리포트 메일(프로젝트별 요약을 owner 에게, 그룹 C email 재사용). 인증은 미들웨어 한 곳에서 none/single/multi 분기. 
+완료 기준: 두 계정이 서로의 데이터를 볼 수 없다 — 목록으로도, 요청 id 를 직접 열어도(IDOR).
 
 ## 11. 부하 생성기 & 측정 지표 (이력서용 숫자 확보)
 

@@ -1,7 +1,6 @@
 import "server-only";
 import { Client, types } from "cassandra-driver";
 
-import { PROJECT } from "./config";
 import { daysInWindow, emptyBuckets, type Window } from "./time";
 
 // Reuse one Client across requests (and across dev hot-reloads via globalThis),
@@ -155,10 +154,10 @@ function add(b: Bucket, row: Record<string, unknown>): void {
 }
 
 /** The rollup rows for one breakdown axis over a window — the shared read. */
-async function rollupRows(w: Window, dim: string) {
+async function rollupRows(project: string, w: Window, dim: string) {
   const days = daysInWindow(w);
   const placeholders = days.map(() => "?").join(",");
-  const params = [PROJECT, dim, ...days.map((d) => types.LocalDate.fromString(d))];
+  const params = [project, dim, ...days.map((d) => types.LocalDate.fromString(d))];
   const cql =
     "SELECT day, hour, cost_micros, requests, errors, prompt_tokens, " +
     "completion_tokens, latency_sum_ms, cache_hits, lat_count, quality_sum, quality_count, " +
@@ -171,11 +170,11 @@ async function rollupRows(w: Window, dim: string) {
 }
 
 /** Totals only — the breakdown doesn't need a trend line drawn for every model. */
-async function rollupTotals(w: Window, dim: string): Promise<Totals> {
+async function rollupTotals(project: string, w: Window, dim: string): Promise<Totals> {
   const totals = empty();
   const startHour = Math.floor(w.start.getTime() / 3_600_000) * 3_600_000;
 
-  for (const row of await rollupRows(w, dim)) {
+  for (const row of await rollupRows(project, w, dim)) {
     const [y, m, d] = String(row.day).split("-").map(Number);
     const hourTs = Date.UTC(y, m - 1, d, num(row.hour));
     if (hourTs < startHour || hourTs > w.end.getTime()) continue;
@@ -188,8 +187,8 @@ async function rollupTotals(w: Window, dim: string): Promise<Totals> {
  * Read the pre-aggregated hourly rollup for one breakdown axis over a window.
  * Wide-range dashboard reads hit this table, never the raw per-request rows.
  */
-export async function readRollup(w: Window, dim = "all"): Promise<Overview> {
-  const res = { rows: await rollupRows(w, dim) };
+export async function readRollup(project: string, w: Window, dim = "all"): Promise<Overview> {
+  const res = { rows: await rollupRows(project, w, dim) };
 
   const unitStep = w.unit === "hour" ? 3_600_000 : 86_400_000;
   const floorBucket = (t: number) => Math.floor(t / unitStep) * unitStep;
@@ -262,13 +261,13 @@ export interface ModelRow {
  * Which models saw traffic in this window (dims_by_day) — a partition lookup per
  * day, not a scan.
  */
-async function modelsSeen(w: Window): Promise<Map<string, string | null>> {
+async function modelsSeen(project: string, w: Window): Promise<Map<string, string | null>> {
   const days = daysInWindow(w);
   const placeholders = days.map(() => "?").join(",");
   const cql =
     "SELECT value, provider FROM dims_by_day " +
     `WHERE project_id = ? AND day IN (${placeholders}) AND kind = ?`;
-  const params = [PROJECT, ...days.map((d) => types.LocalDate.fromString(d)), "model"];
+  const params = [project, ...days.map((d) => types.LocalDate.fromString(d)), "model"];
 
   const res = await client().execute(cql, params, { prepare: true });
 
@@ -282,8 +281,8 @@ async function modelsSeen(w: Window): Promise<Map<string, string | null>> {
  * per-model rollup reads the breakdown goes on to do. The Rules screen needs it to
  * offer the scopes that actually exist, and nothing else about them.
  */
-export async function modelsInWindow(w: Window): Promise<string[]> {
-  return [...(await modelsSeen(w)).keys()].sort();
+export async function modelsInWindow(project: string, w: Window): Promise<string[]> {
+  return [...(await modelsSeen(project, w)).keys()].sort();
 }
 
 /**
@@ -297,7 +296,7 @@ export async function modelsInWindow(w: Window): Promise<string[]> {
  * One query however many days: the rollup's partition key is (project, dim, day), so a
  * month is a handful of partitions read by name and never a scan.
  */
-export async function keySpendByDay(keyId: string, days: string[]): Promise<Map<string, number>> {
+export async function keySpendByDay(project: string, keyId: string, days: string[]): Promise<Map<string, number>> {
   const spend = new Map<string, number>();
   if (days.length === 0) return spend;
 
@@ -305,7 +304,7 @@ export async function keySpendByDay(keyId: string, days: string[]): Promise<Map<
   const cql =
     "SELECT day, cost_micros FROM rollup_hourly " +
     `WHERE project_id = ? AND dim = ? AND day IN (${placeholders})`;
-  const params = [PROJECT, `key:${keyId}`, ...days.map((d) => types.LocalDate.fromString(d))];
+  const params = [project, `key:${keyId}`, ...days.map((d) => types.LocalDate.fromString(d))];
 
   const res = await client().execute(cql, params, { prepare: true });
   for (const row of res.rows) {
@@ -324,12 +323,12 @@ export async function keySpendByDay(keyId: string, days: string[]): Promise<Map<
  * scanning raw data: fine at a few hundred rows, 1.8 seconds at 1.5M once the
  * P3 load test put that many in.
  */
-export async function modelBreakdown(w: Window): Promise<ModelRow[]> {
-  const seen = await modelsSeen(w);
+export async function modelBreakdown(project: string, w: Window): Promise<ModelRow[]> {
+  const seen = await modelsSeen(project, w);
 
   const rows = await Promise.all(
     [...seen].map(async ([model, provider]) => {
-      const totals = await rollupTotals(w, `model:${model}`);
+      const totals = await rollupTotals(project, w, `model:${model}`);
       return {
         model,
         provider,

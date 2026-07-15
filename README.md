@@ -44,7 +44,7 @@ to evaluate rules, and to score quality — all off the critical path.
 |------------|-------------------------------------------------------------|-------------------------------|
 | gateway    | OpenAI-compatible proxy; auth, budget, cache, rate limit    | Node.js · Fastify · TypeScript |
 | workers    | ingest / rules / eval consumers                             | Python 3.12 · Kafka           |
-| dashboard  | console UI + read API                                       | Next.js (App Router) · TS     |
+| dashboard  | console UI + read API; NextAuth in multi mode               | Next.js (App Router) · TS     |
 | loadgen    | synthetic traffic / event generator                        | Python CLI                    |
 | infra      | orchestration                                              | Docker Compose                |
 | pipeline   | events · metrics · documents                                | Kafka (KRaft) · Cassandra · MongoDB |
@@ -60,7 +60,7 @@ Each phase ends in a *running* state — not a half-built one.
 - [x] **P3 — Gateway.** Fastify proxy: API-key auth, mock + OpenAI/Anthropic/self-hosted adapters, cost calc, caching, budgets, rate limits, Kafka publish; API Keys + Pricing console screens.
 - [x] **P4 — Workflows & alerts.** Rules worker (a second consumer group on the same event stream) + rule builder UI + email/webhook/block/tag actions + cooldowns + firing history; latency percentiles and a budget-burn gauge.
 - [x] **P5 — Quality, streaming, fallback.** SSE streaming (usage summed from the frames), model fallback when a provider fails, an eval worker that samples calls and has an LLM score them, Quality + Settings screens, and a `quality_drop` rule condition.
-- [ ] **P6 — Multi-tenancy.** Sign-up/login, project isolation, roles, weekly usage report emails.
+- [x] **P6 — Multi-tenancy.** `AUTH_MODE=multi`: sign-up/login (NextAuth + scrypt), projects as the isolation boundary (every console read, and both workers, scoped to the session's tenant), members and owner/member roles, a project switcher, and a weekly per-project usage report email.
 
 ## Repository layout
 
@@ -128,6 +128,7 @@ Open the **console at http://localhost:3000**:
 | **API Keys** | Issue keys (shown once), block or revoke them, set per-key budgets and rate limits |
 | **Pricing** | The per-model rates every call is billed against — and the provider each one routes to |
 | **Rules** | Alert rules, and what they actually did about it |
+| **Project** | *(multi mode)* Members and their roles, adding and removing them, and creating another project |
 | **Settings** | The sampling rate and the judge model (editable, live) — and what the environment is doing about auth, mail and fallback |
 
 Set a $0.01 daily budget on a key in **API Keys**, spend it, and the next call comes back
@@ -277,6 +278,40 @@ was told to trust:
 Without those two guards the rule would fire continuously on any system where evaluation is
 switched off — an unscored window averages 0.0, and 0.0 is below every threshold anyone would
 set. That is the loudest imaginable way to report "no data".
+
+## Turn on accounts
+
+Everything above runs open by default (`AUTH_MODE=none`) — the zero-config demo. Two other
+modes gate the console, and the switch lives in one place:
+
+```bash
+AUTH_MODE=single    # one email/password from .env (ADMIN_EMAIL / ADMIN_PASSWORD)
+AUTH_MODE=multi     # real accounts, projects and roles
+```
+
+In **multi** mode the console has accounts (NextAuth, email + a scrypt-hashed password) and
+becomes multi-tenant. A **project is the isolation boundary** — and it isn't new to the data:
+every request, key, rule and metric has carried a `project_id` since P2, when the Cassandra
+partition key was first designed to lead with it. It was always the constant `"default"`; multi
+mode makes it the session's project instead.
+
+The boundary is enforced, not decorative. **Two accounts cannot see each other's data** — not
+in a list, and not by opening a request id directly (that's a not-found, scoped in the query,
+never found-then-hidden). It runs both ways: an owner adds a teammate by email, and only then
+can they see the project. Members and owners differ (owners manage members; the last owner
+can't be removed, or the project would be orphaned), and a switcher moves between the projects
+you belong to.
+
+The isolation reaches the workers too, not just the console: the rules worker evaluates each
+rule against its own tenant's rollup and stamps firings with the project, and the eval worker
+writes each quality score back to the project the scored call belongs to. And once a week, each
+project's owners get a **usage report** — requests, cost, error rate, quality — emailed through
+the same Mailpit the alerts use.
+
+> The refactor that made this safe leaned on the type checker: every per-project read takes a
+> `projectId` argument, so dropping the old global constant turned every call site that touches
+> tenant data into a compile error until it was scoped. A missed read is a build failure, not a
+> silent cross-tenant leak.
 
 ## Benchmarks
 

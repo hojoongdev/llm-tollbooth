@@ -1,5 +1,6 @@
 import { budgetBurn } from "@/lib/budget";
 import { modelBreakdown, readRollup } from "@/lib/cassandra";
+import { currentProject } from "@/lib/project";
 import { parseRange, windowFor, RANGE_LABEL_KO } from "@/lib/time";
 import { BudgetBurn } from "@/components/BudgetBurn";
 import { Cards } from "@/components/Cards";
@@ -18,13 +19,14 @@ export default async function OverviewPage({
 }) {
   const range = parseRange((await searchParams).range);
   const w = windowFor(range);
+  const { id: projectId } = await currentProject();
   // budgetBurn takes no window, and that is not an oversight: a cap is a calendar thing.
   // It always reads today and this month, in UTC, because that is what the gateway
   // enforces against.
   const [overview, models, burn] = await Promise.all([
-    readRollup(w, "all"),
-    modelBreakdown(w),
-    budgetBurn(),
+    readRollup(projectId, w, "all"),
+    modelBreakdown(projectId, w),
+    budgetBurn(projectId),
   ]);
 
   return (

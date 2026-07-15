@@ -84,13 +84,17 @@ function toFiring(d: Record<string, any>): FiringRow {
   };
 }
 
-export async function listRules(): Promise<RuleRow[]> {
-  const docs = await rules().find({}).sort({ created_at: -1 }).toArray();
+export async function listRules(projectId: string): Promise<RuleRow[]> {
+  const docs = await rules().find({ project_id: projectId }).sort({ created_at: -1 }).toArray();
   return docs.map(toRule);
 }
 
-export async function listFirings(limit = 50): Promise<FiringRow[]> {
-  const docs = await firings().find({}).sort({ fired_at: -1 }).limit(limit).toArray();
+export async function listFirings(projectId: string, limit = 50): Promise<FiringRow[]> {
+  const docs = await firings()
+    .find({ project_id: projectId })
+    .sort({ fired_at: -1 })
+    .limit(limit)
+    .toArray();
   return docs.map(toFiring);
 }
 
@@ -142,9 +146,13 @@ function conditionOf(r: NewRule): Record<string, unknown> {
   }
 }
 
-export async function createRule(r: NewRule): Promise<void> {
+export async function createRule(projectId: string, r: NewRule): Promise<void> {
   await rules().insertOne({
     _id: `rule_${randomBytes(4).toString("hex")}` as never,
+    // The rule belongs to a project now — the rules worker reads this to know which
+    // tenant's rollup partition to evaluate it against (multi mode). It was absent
+    // through P5, when there was only ever the one project.
+    project_id: projectId,
     name: r.name,
     enabled: true,
     scope: r.scope,
@@ -156,8 +164,10 @@ export async function createRule(r: NewRule): Promise<void> {
   });
 }
 
-export async function setRuleEnabled(id: string, enabled: boolean): Promise<void> {
-  await rules().updateOne({ _id: id as never }, { $set: { enabled } });
+// The rule mutations scope by project_id too, so an id forged into a server action
+// cannot flip, retune, re-arm or delete a rule in another tenant's project.
+export async function setRuleEnabled(projectId: string, id: string, enabled: boolean): Promise<void> {
+  await rules().updateOne({ _id: id as never, project_id: projectId }, { $set: { enabled } });
 }
 
 /**
@@ -166,6 +176,7 @@ export async function setRuleEnabled(id: string, enabled: boolean): Promise<void
  * keyword rule has neither, and only its cooldown is worth a second thought.
  */
 export async function setRuleTuning(
+  projectId: string,
   id: string,
   kind: ConditionKind,
   value: number,
@@ -176,7 +187,7 @@ export async function setRuleTuning(
   if (kind === "budget_percent") set["condition.percent"] = value;
   if (kind === "quality_drop") set["condition.min_score"] = value;
 
-  await rules().updateOne({ _id: id as never }, { $set: set });
+  await rules().updateOne({ _id: id as never, project_id: projectId }, { $set: set });
 }
 
 /**
@@ -186,14 +197,14 @@ export async function setRuleTuning(
  * the thing, sitting out the other twenty-nine minutes to find out whether they fixed it is
  * the opposite of useful.
  */
-export async function armRule(id: string): Promise<void> {
-  await rules().updateOne({ _id: id as never }, { $set: { last_fired_at: null } });
+export async function armRule(projectId: string, id: string): Promise<void> {
+  await rules().updateOne({ _id: id as never, project_id: projectId }, { $set: { last_fired_at: null } });
 }
 
 /**
  * Deleting a rule leaves its firings alone. They record what happened, and deleting the
  * rule does not un-happen it.
  */
-export async function deleteRule(id: string): Promise<void> {
-  await rules().deleteOne({ _id: id as never });
+export async function deleteRule(projectId: string, id: string): Promise<void> {
+  await rules().deleteOne({ _id: id as never, project_id: projectId });
 }

@@ -1,12 +1,17 @@
-// Console access control (spec §6). AUTH_MODE=none (default) leaves the console
-// open; AUTH_MODE=single gates it behind one email/password taken from env.
+// Console access control (spec §6). Three modes, isolated to this one place:
+//   none    — open console (default; local demos)
+//   single  — one email/password from env, guarded by the HMAC cookie session below
+//   multi   — real accounts, projects and roles, handled by NextAuth (lib/nextauth.ts)
 //
-// Everything here runs in BOTH the edge middleware and Node server actions, so it
-// uses Web Crypto (globalThis.crypto) and btoa/atob — never node:crypto.
+// Everything in *this* file runs in BOTH the edge middleware and Node server actions,
+// so it uses Web Crypto (globalThis.crypto) and btoa/atob — never node:crypto. The
+// multi-mode machinery lives elsewhere precisely because it needs Node (Mongo, scrypt);
+// keeping the mode switch here and the implementations apart is what §6 asks for.
 
-export type AuthMode = "none" | "single";
+export type AuthMode = "none" | "single" | "multi";
 
-export const AUTH_MODE: AuthMode = process.env.AUTH_MODE === "single" ? "single" : "none";
+export const AUTH_MODE: AuthMode =
+  process.env.AUTH_MODE === "single" ? "single" : process.env.AUTH_MODE === "multi" ? "multi" : "none";
 export const SESSION_COOKIE = "tb_session";
 export const SESSION_MAX_AGE = 60 * 60 * 24 * 7; // 7 days, in seconds
 

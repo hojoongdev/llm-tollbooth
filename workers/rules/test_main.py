@@ -29,6 +29,8 @@ from main import (
     metric_value,
     percentile,
     prompt_text,
+    report_body,
+    report_subject,
     response_text,
     scope_query,
     trigger_text,
@@ -410,19 +412,19 @@ def test_a_24h_window_spans_two_day_partitions():
 # dims_of — the stream tells us which scopes could have moved
 # --------------------------------------------------------------------------- #
 def test_an_event_activates_exactly_the_three_axes_the_rollup_keeps():
-    # These must be the same three strings the ingest worker increments, or a rule
-    # scoped to a key would never be told that key made a call.
-    assert dims_of({"model": "gpt-4o", "api_key_id": "key_abc"}) == (
-        "all",
-        "model:gpt-4o",
-        "key:key_abc",
+    # (project, dim) pairs — the same three dims the ingest worker increments, each
+    # qualified by the event's project so one tenant's traffic can't activate another's rule.
+    assert dims_of({"project_id": "prj_a", "model": "gpt-4o", "api_key_id": "key_abc"}) == (
+        ("prj_a", "all"),
+        ("prj_a", "model:gpt-4o"),
+        ("prj_a", "key:key_abc"),
     )
 
 
 def test_a_field_less_event_still_maps_onto_the_axes_ingest_wrote():
-    # ingest defaults a missing model/key to "unknown" and rolls it up under that
-    # name. If this defaulted differently, the rule would watch a dim that has no row.
-    assert dims_of({}) == ("all", "model:unknown", "key:unknown")
+    # ingest defaults a missing model/key to "unknown" and a missing project to "default"
+    # (the PROJECT env). If this defaulted differently, the rule would watch a dim with no row.
+    assert dims_of({}) == (("default", "all"), ("default", "model:unknown"), ("default", "key:unknown"))
 
 
 # --------------------------------------------------------------------------- #
@@ -435,30 +437,72 @@ NOW = datetime(2026, 7, 13, 14, 30, tzinfo=timezone.utc)
 def test_a_scoped_query_selects_the_same_requests_the_counters_counted():
     # The `tag` action labels the requests that made up the breach. If this selected a
     # different set than the rollup dim aggregated, the tag would point at the wrong
-    # calls — and look authoritative doing it.
-    assert scope_query("key:key_abc", START, NOW) == {
+    # calls — and look authoritative doing it. Every query is bounded by the tenant too.
+    assert scope_query("prj_a", "key:key_abc", START, NOW) == {
+        "project_id": "prj_a",
         "ts": {"$gte": START, "$lte": NOW},
         "api_key_id": "key_abc",
     }
-    assert scope_query("model:gpt-4o", START, NOW) == {
+    assert scope_query("prj_a", "model:gpt-4o", START, NOW) == {
+        "project_id": "prj_a",
         "ts": {"$gte": START, "$lte": NOW},
         "model": "gpt-4o",
     }
-    assert scope_query("all", START, NOW) == {"ts": {"$gte": START, "$lte": NOW}}
+    assert scope_query("prj_a", "all", START, NOW) == {"project_id": "prj_a", "ts": {"$gte": START, "$lte": NOW}}
 
 
-def test_a_scope_is_always_bounded_by_the_window():
-    # Every branch carries the ts bound. Drop it on one and a tag action would sweep
-    # the entire retention period instead of the hour that actually tripped.
+def test_a_scope_is_always_bounded_by_the_window_and_the_project():
+    # Every branch carries the ts bound and the project. Drop the ts on one and a tag
+    # action sweeps the whole retention period; drop the project and it crosses tenants.
     for scope in ("all", "model:gpt-4o", "key:key_abc"):
-        assert scope_query(scope, START, NOW)["ts"] == {"$gte": START, "$lte": NOW}
+        q = scope_query("prj_a", scope, START, NOW)
+        assert q["ts"] == {"$gte": START, "$lte": NOW}
+        assert q["project_id"] == "prj_a"
 
 
 def test_an_unknown_scope_is_refused_rather_than_matching_everything():
     # A typo'd scope must not silently degrade into "all" — that would tag, or block,
     # far more than the rule asked for.
     with pytest.raises(ValueError, match="unknown scope"):
-        scope_query("project:default", START, NOW)
+        scope_query("prj_a", "feature:checkout", START, NOW)
+
+
+# --------------------------------------------------------------------------- #
+# Weekly report (P6) — the pure summary builders
+# --------------------------------------------------------------------------- #
+WEEK_START = datetime(2026, 7, 8, 0, 0, tzinfo=timezone.utc)
+WEEK_END = datetime(2026, 7, 15, 0, 0, tzinfo=timezone.utc)
+
+
+def test_report_subject_names_the_project():
+    assert report_subject("acme-staging") == "[tollbooth] Weekly usage — acme-staging"
+
+
+def test_report_body_summarises_the_week():
+    w = Window(cost=4.2718, requests=1500, errors=30, tokens=91234, latency_p95=812.0)
+    body = report_body("acme-staging", w, WEEK_START, WEEK_END)
+    assert "Weekly usage for acme-staging" in body
+    assert "2026-07-08 — 2026-07-15 (UTC)" in body
+    assert "1,500" in body          # requests, grouped
+    assert "2.0%" in body           # error rate 30/1500
+    assert "$4.2718" in body        # cost to the sub-cent
+    assert "812 ms" in body
+
+
+def test_report_omits_quality_when_nothing_was_scored():
+    # eval samples; a week with no scored calls has no average, and printing 0.0 would call
+    # a working project a failing one — the same absence-is-not-zero rule the UI follows.
+    w = Window(cost=1.0, requests=100, errors=0, tokens=1000, latency_p95=200.0)
+    assert "no calls scored" in report_body("p", w, WEEK_START, WEEK_END)
+    assert "/ 5" not in report_body("p", w, WEEK_START, WEEK_END)
+
+
+def test_report_shows_quality_when_there_is_some():
+    w = Window(cost=1.0, requests=100, errors=0, tokens=1000, latency_p95=200.0,
+               quality_sum=380 * 12, quality_count=12)
+    body = report_body("p", w, WEEK_START, WEEK_END)
+    assert "3.80 / 5" in body
+    assert "12 scored" in body
 
 
 # --------------------------------------------------------------------------- #

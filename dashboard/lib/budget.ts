@@ -34,8 +34,8 @@ function daysOfMonth(now: Date): string[] {
   return days;
 }
 
-export async function budgetBurn(now: Date = new Date()): Promise<BurnRow[]> {
-  const budgeted = (await listKeys()).filter((k) => k.dailyUsd !== null || k.monthlyUsd !== null);
+export async function budgetBurn(projectId: string, now: Date = new Date()): Promise<BurnRow[]> {
+  const budgeted = (await listKeys(projectId)).filter((k) => k.dailyUsd !== null || k.monthlyUsd !== null);
   if (budgeted.length === 0) return [];
 
   const today = dayKey(now);
@@ -44,7 +44,7 @@ export async function budgetBurn(now: Date = new Date()): Promise<BurnRow[]> {
   const rows = await Promise.all(
     budgeted.map(async (k) => {
       // Read the month only when a monthly cap exists — same economy the gateway makes.
-      const byDay = await keySpendByDay(k.id, k.monthlyUsd !== null ? month : [today]);
+      const byDay = await keySpendByDay(projectId, k.id, k.monthlyUsd !== null ? month : [today]);
 
       let spentThisMonth = 0;
       for (const usd of byDay.values()) spentThisMonth += usd;

@@ -396,10 +396,15 @@ def score_one(session: Session, stmts: dict, store: Store, model: str, task: dic
     embed = {**scores, "overall": overall, "model": model, "scored_at": datetime.now(timezone.utc)}
     store.requests.update_one({"_id": doc_id}, {"$set": {"eval": embed}})
 
+    # The score lands in the rollup partition of the project the *scored call* belongs to
+    # (from the task), not the worker's own PROJECT env. In multi mode the eval worker reads
+    # every tenant's events off one stream and has to write each score back to the right
+    # tenant — writing them all to "default" would pool every project's quality into one.
     day = _parse_ts(task.get("ts"))
+    project = task.get("project_id") or PROJECT
     q = round(overall * 100)
     for dim in dims_of(task.get("model") or "", task.get("api_key_id") or ""):
-        session.execute(stmts["quality"], (q, 1, PROJECT, dim, day.date(), day.hour))
+        session.execute(stmts["quality"], (q, 1, project, dim, day.date(), day.hour))
 
     print(f"eval: scored {doc_id} -> {overall} ({scores['reason']})", flush=True)
     return True

@@ -1,7 +1,6 @@
 import "server-only";
 import { MongoClient, type Db } from "mongodb";
 
-import { PROJECT } from "./config";
 import type { Window } from "./time";
 
 const g = globalThis as unknown as { __mongo?: MongoClient };
@@ -38,6 +37,7 @@ export interface RequestRow {
 }
 
 export interface RequestFilter {
+  projectId: string;
   window: Window;
   model?: string;
   status?: string;
@@ -68,7 +68,7 @@ function toRow(d: Record<string, any>): RequestRow {
 /** Recent request log for the table, newest first. */
 export async function listRequests(f: RequestFilter): Promise<RequestRow[]> {
   const q: Record<string, unknown> = {
-    project_id: PROJECT,
+    project_id: f.projectId,
     ts: { $gte: f.window.start, $lte: f.window.end },
   };
   if (f.model) q.model = f.model;
@@ -115,8 +115,12 @@ export interface RequestDetail extends RequestRow {
  * its batch. Either can be the one that hasn't landed yet, so every field here
  * is treated as optional.
  */
-export async function getRequest(id: string): Promise<RequestDetail | null> {
-  const doc = await db().collection("requests").findOne({ _id: id as never });
+export async function getRequest(projectId: string, id: string): Promise<RequestDetail | null> {
+  // project_id is in the filter, not checked after the read, and that is the whole
+  // point: a request from another tenant must be *not found*, not found-then-hidden.
+  // Without it, anyone who knows (or guesses) an event id could open the prompt and
+  // response of a call in someone else's project by visiting /requests/<id>.
+  const doc = await db().collection("requests").findOne({ _id: id as never, project_id: projectId });
   if (!doc) return null;
 
   const e = doc.eval;
